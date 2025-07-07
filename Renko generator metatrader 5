@@ -1,0 +1,151 @@
+//+------------------------------------------------------------------+
+//|                                                    EURUSD_DCA_BB_EA.mq5 |
+//|              Expert Advisor: BB + DCA + EMA Trend + RSI Filter     |
+//+------------------------------------------------------------------+
+#property copyright "OpenAI"
+#property version   "1.02"
+#property strict
+
+#include <Trade/Trade.mqh>
+
+//--- inputs
+input ENUM_TIMEFRAMES InpTimeframe        = PERIOD_M5;    // Timeframe intradía: M5 o M15
+input double         InpInitialLot        = 0.10;         // Lote inicial
+input int            InpCloseAfterCandles = 5;            // Cerrar tras X velas de 1 min
+input int            InpBBPeriod          = 20;           // Periodo BB
+input double         InpBBDeviation       = 2.0;          // Desviación BB
+input double         InpTakeProfit        = 15.0;         // TP en pips
+input double         InpStopLoss          = 40.0;         // SL en pips (reducido para RR)
+input int            InpDcaMaxLevel       = 2;            // Máx niveles DCA
+input double         InpDcaMultiplier     = 1.5;          // Multiplicador lote DCA
+input int            InpDcaDistance       = 30;           // Distancia DCA en pips
+input int            InpMagic             = 20250627;     // Magic number
+
+//--- objetos globales
+CTrade trade;
+
+datetime firstEntryTime = 0;
+double   firstEntryPrice = 0;
+int      dcaCount = 0;
+
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   trade.SetExpertMagicNumber(InpMagic);
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   static datetime lastTime = 0;
+   datetime cur = iTime(_Symbol, InpTimeframe, 0);
+   if(cur == lastTime) return;
+   lastTime = cur;
+
+   //--- cálculos de indicadores
+   double bbUp, bbMid, bbLow;
+   if(!GetBollinger(_Symbol, InpTimeframe, InpBBPeriod, InpBBDeviation, bbUp, bbMid, bbLow)) return;
+
+   // EMA en M15 para filtro de tendencia
+   double ema15 = GetEMA(_Symbol, PERIOD_M15, 200);
+   // RSI en InpTimeframe para condición de sobreventa
+   double rsi = GetRSI(_Symbol, InpTimeframe, 14);
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+
+   //--- gestión de posición
+   if(!PositionSelect(_Symbol))
+   {
+      // reset DCA variables
+      dcaCount = 0;
+      firstEntryTime = 0;
+      firstEntryPrice = 0;
+
+      // Condición de entrada: rebote en banda inferior + tendencia alcista + rsi <30
+      if(bid <= bbLow && bid > ema15 && rsi < 30)
+      {
+         double sl = bid - InpStopLoss*_Point;
+         double tp = bid + InpTakeProfit*_Point;
+         if(trade.Buy(InpInitialLot, _Symbol, bid, sl, tp))
+         {
+            firstEntryTime = TimeCurrent();
+            firstEntryPrice = ask;
+         }
+      }
+      return;
+   }
+
+   //--- salida por cruce banda media o RSI sobrecompra
+   if(bid >= bbMid || rsi > 70)
+   {
+      trade.PositionClose(_Symbol);
+      ResetState();
+      return;
+   }
+
+   //--- DCA: refuerzo si profundiza contra tendencia
+   if(dcaCount < InpDcaMaxLevel && bid <= firstEntryPrice - InpDcaDistance*_Point)
+   {
+      double lot = InpInitialLot * MathPow(InpDcaMultiplier, dcaCount+1);
+      double sl  = bid - InpStopLoss*_Point;
+      double tp  = bid + InpTakeProfit*_Point;
+      if(trade.Buy(lot, _Symbol, bid, sl, tp))
+         dcaCount++;
+   }
+
+   //--- cierre por tiempo si persiste la operación
+   if(firstEntryTime>0 && (TimeCurrent()-firstEntryTime) >= InpCloseAfterCandles*60)
+   {
+      trade.PositionClose(_Symbol);
+      ResetState();
+   }
+}
+
+//+------------------------------------------------------------------+
+void ResetState()
+{
+   dcaCount = 0;
+   firstEntryTime = 0;
+   firstEntryPrice = 0;
+}
+
+//+------------------------------------------------------------------+
+bool GetBollinger(const string symbol, ENUM_TIMEFRAMES tf, int period, double dev, double &up, double &mid, double &low)
+{
+   int h = iBands(symbol, tf, period, dev, 0, PRICE_CLOSE);
+   if(h==INVALID_HANDLE) return false;
+   double bufUp[1], bufMid[1], bufLow[1];
+   if(CopyBuffer(h, 0, 0, 1, bufUp)<0 || CopyBuffer(h,1,0,1,bufMid)<0 || CopyBuffer(h,2,0,1,bufLow)<0)
+   {
+      IndicatorRelease(h);
+      return false;
+   }
+   up=bufUp[0]; mid=bufMid[0]; low=bufLow[0];
+   IndicatorRelease(h);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+double GetEMA(const string symbol, ENUM_TIMEFRAMES tf, int period)
+{
+   int h = iMA(symbol, tf, period, 0, MODE_EMA, PRICE_CLOSE);
+   if(h==INVALID_HANDLE) return 0;
+   double buf[1];
+   CopyBuffer(h,0,0,1,buf);
+   IndicatorRelease(h);
+   return buf[0];
+}
+
+//+------------------------------------------------------------------+
+double GetRSI(const string symbol, ENUM_TIMEFRAMES tf, int period)
+{
+   int h = iRSI(symbol, tf, period, PRICE_CLOSE);
+   if(h==INVALID_HANDLE) return 50;
+   double buf[1];
+   CopyBuffer(h,0,0,1,buf);
+   IndicatorRelease(h);
+   return buf[0];
+}
+//+------------------------------------------------------------------+
