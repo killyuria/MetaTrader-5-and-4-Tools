@@ -1,0 +1,233 @@
+//+------------------------------------------------------------------+
+//|                                                 DCA_Bot_MT4.mq4  |
+//|                                Adapted from MQL5 version         |
+//+------------------------------------------------------------------+
+#property strict
+#property version   "1.00"
+#property description "DCA bot example for MetaTrader 4"
+
+input string   InpSymbol       = "EURUSD";   // Trading pair
+input int      timeframe_minutes=5;           // Timeframe in minutes
+input double   lot             = 0.01;        // Initial lot size
+input double   profit_target   = 2.0;         // Profit target (%)
+input int      max_dca_orders  = 3;           // Max. DCA orders
+input double   price_step      = 0.1;         // Price deviation (%)
+input double   stop_loss_pct   = 5.0;         // Stop loss (% of balance)
+input double   dca_multiplier  = 2.0;         // Lot multiplier
+
+int timeframe;
+bool   direction_buy = true;
+int    dca_count = 0;
+double next_level = -price_step;
+double current_lot = lot;
+double last_entry_price = 0;
+int    MagicNumber = 100;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   switch(timeframe_minutes)
+     {
+      case 1:  timeframe = PERIOD_M1;  break;
+      case 5:  timeframe = PERIOD_M5;  break;
+      case 15: timeframe = PERIOD_M15; break;
+      case 30: timeframe = PERIOD_M30; break;
+      case 60: timeframe = PERIOD_H1;  break;
+      default: timeframe = timeframe_minutes;
+     }
+   GetTrend();
+   OpenMarketOrder(current_lot,direction_buy);
+   last_entry_price = direction_buy ? Ask : Bid;
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   CloseAll();
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   static datetime last_check=0;
+   if(last_check==TimeCurrent())
+      return;
+   last_check=TimeCurrent();
+
+   if(!HasOpenPosition())
+     {
+      GetTrend();
+      current_lot=lot;
+      dca_count=0;
+      next_level=-price_step;
+      OpenMarketOrder(current_lot,direction_buy);
+      last_entry_price = direction_buy ? Ask : Bid;
+      return;
+     }
+
+   double profit_pct = CurrentProfitPct();
+   double account_pct = CurrentProfitPctBalance();
+   if(account_pct <= -stop_loss_pct)
+     {
+      CloseAll();
+      dca_count=0;
+      next_level=-price_step;
+      current_lot=lot;
+      GetTrend();
+      OpenMarketOrder(current_lot,direction_buy);
+      last_entry_price = direction_buy ? Ask : Bid;
+      return;
+     }
+   if(profit_pct >= profit_target)
+     {
+      CloseAll();
+      dca_count=0;
+      next_level=-price_step;
+      current_lot=lot;
+      GetTrend();
+      OpenMarketOrder(current_lot,direction_buy);
+      last_entry_price = direction_buy ? Ask : Bid;
+      return;
+     }
+
+   double dev = PriceDeviation(last_entry_price);
+   if(dev<=next_level && dca_count<max_dca_orders)
+     {
+      current_lot *= dca_multiplier;
+      if(OpenMarketOrder(current_lot,direction_buy))
+        {
+         last_entry_price = direction_buy ? Ask : Bid;
+         next_level += -price_step;
+         dca_count++;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Determine trend using EMAs                                       |
+//+------------------------------------------------------------------+
+void GetTrend()
+  {
+   double ema5 = iMA(InpSymbol,timeframe,5,0,MODE_EMA,PRICE_CLOSE,0);
+   double ema8 = iMA(InpSymbol,timeframe,8,0,MODE_EMA,PRICE_CLOSE,0);
+   direction_buy = ema5 > ema8;
+  }
+
+//+------------------------------------------------------------------+
+//| Calculate current profit percentage relative to margin            |
+//+------------------------------------------------------------------+
+double CurrentProfitPct()
+  {
+   double margin_sum=0.0;
+   double profit=0.0;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      if(OrderSelect(i,SELECT_BY_POS,MODE_TRADES))
+        {
+         if(OrderSymbol()==InpSymbol && OrderMagicNumber()==MagicNumber)
+           {
+            double vol = OrderLots();
+            double price = OrderOpenPrice();
+            int type = OrderType();
+            double margin = MarketInfo(InpSymbol,MODE_MARGINREQUIRED)*vol;
+            margin_sum+=margin;
+            profit+=OrderProfit()+OrderSwap()+OrderCommission();
+           }
+        }
+     }
+   if(margin_sum==0.0)
+      return(0.0);
+   return(profit/margin_sum*100.0);
+  }
+
+//+------------------------------------------------------------------+
+//| Profit relative to account balance                               |
+//+------------------------------------------------------------------+
+double CurrentProfitPctBalance()
+  {
+   double profit=0.0;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      if(OrderSelect(i,SELECT_BY_POS,MODE_TRADES))
+        {
+         if(OrderSymbol()==InpSymbol && OrderMagicNumber()==MagicNumber)
+            profit+=OrderProfit()+OrderSwap()+OrderCommission();
+        }
+     }
+   double balance=AccountBalance();
+   if(balance==0.0)
+      return(0.0);
+   return(profit/balance*100.0);
+  }
+
+//+------------------------------------------------------------------+
+//| Open a market order                                              |
+//+------------------------------------------------------------------+
+bool OpenMarketOrder(double volume,bool buy)
+  {
+   RefreshRates();
+   int type = buy?OP_BUY:OP_SELL;
+   double price = buy?Ask:Bid;
+   int ticket = OrderSend(InpSymbol,type,volume,price,20,0,0,"dca bot",MagicNumber,0,clrNONE);
+   if(ticket<0)
+     {
+      Print("OrderSend failed: ",GetLastError());
+      return(false);
+     }
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Returns deviation from reference price                           |
+//+------------------------------------------------------------------+
+double PriceDeviation(double reference_price)
+  {
+   RefreshRates();
+   double current = direction_buy?Ask:Bid;
+   double dev = (current-reference_price)/reference_price*100.0;
+   return direction_buy?dev:-dev;
+  }
+
+//+------------------------------------------------------------------+
+//| Close all open positions                                         |
+//+------------------------------------------------------------------+
+void CloseAll()
+  {
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      if(OrderSelect(i,SELECT_BY_POS,MODE_TRADES))
+        {
+         if(OrderSymbol()==InpSymbol && OrderMagicNumber()==MagicNumber)
+           {
+            int type=OrderType();
+            double volume=OrderLots();
+            RefreshRates();
+            double price=type==OP_BUY?Bid:Ask;
+            OrderClose(OrderTicket(),volume,price,20,clrNONE);
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Check if there is an open position                               |
+//+------------------------------------------------------------------+
+bool HasOpenPosition()
+  {
+   for(int i=OrdersTotal()-1;i>=0;i--)
+     {
+      if(OrderSelect(i,SELECT_BY_POS,MODE_TRADES))
+        {
+         if(OrderSymbol()==InpSymbol && OrderMagicNumber()==MagicNumber)
+            return(true);
+        }
+     }
+   return(false);
+  }
