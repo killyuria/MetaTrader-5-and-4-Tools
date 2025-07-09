@@ -1,0 +1,236 @@
+#property strict
+#property version   "1.00"
+#property description "DCA bot example"
+
+input string   InpSymbol       = "EURUSD";   // Par de divisas
+input int      timeframe_minutes=5;           // Timeframe in minutes
+input double   lot             = 0.01;        // Initial lot size
+input double   profit_target   = 2.0;         // Profit target (%)
+input int      max_dca_orders  = 3;           // Max. DCA orders
+input double   price_step      = 0.1;         // Price deviation (%)
+input double   stop_loss_pct   = 5.0;         // Stop loss (% of balance)
+input double   dca_multiplier  = 2.0;         // Lot multiplier
+
+ENUM_TIMEFRAMES timeframe;
+bool   direction_buy = true;
+int    dca_count = 0;
+double next_level = -price_step;
+double current_lot = lot;
+double last_entry_price = 0;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+  {
+   // Convert minutes to ENUM_TIMEFRAMES constant
+   switch(timeframe_minutes)
+     {
+      case 1:  timeframe = PERIOD_M1;  break;
+      case 5:  timeframe = PERIOD_M5;  break;
+      case 15: timeframe = PERIOD_M15; break;
+      case 30: timeframe = PERIOD_M30; break;
+      case 60: timeframe = PERIOD_H1;  break;
+      default: timeframe = (ENUM_TIMEFRAMES)timeframe_minutes;
+     }
+   GetTrend();
+   OpenMarketOrder(current_lot,direction_buy);
+   last_entry_price = direction_buy ? SymbolInfoDouble(InpSymbol,SYMBOL_ASK)
+                                     : SymbolInfoDouble(InpSymbol,SYMBOL_BID);
+   return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+   CloseAll();
+  }
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   static datetime last_check=0;
+   if(last_check==TimeCurrent())
+      return;
+   last_check=TimeCurrent();
+
+   if(!PositionSelect(InpSymbol))
+     {
+      GetTrend();
+      current_lot=lot;
+      dca_count=0;
+      next_level=-price_step;
+      OpenMarketOrder(current_lot,direction_buy);
+      last_entry_price = direction_buy ? SymbolInfoDouble(InpSymbol,SYMBOL_ASK)
+                                       : SymbolInfoDouble(InpSymbol,SYMBOL_BID);
+      return;
+     }
+
+  double profit_pct = CurrentProfitPct();
+  double account_pct = CurrentProfitPctBalance();
+  if(account_pct <= -stop_loss_pct)
+    {
+     CloseAll();
+     dca_count=0;
+     next_level=-price_step;
+     current_lot=lot;
+     GetTrend();
+     OpenMarketOrder(current_lot,direction_buy);
+     last_entry_price = direction_buy ? SymbolInfoDouble(InpSymbol,SYMBOL_ASK)
+                                      : SymbolInfoDouble(InpSymbol,SYMBOL_BID);
+     return;
+    }
+  if(profit_pct >= profit_target)
+     {
+      CloseAll();
+      dca_count=0;
+      next_level=-price_step;
+      current_lot=lot;
+      GetTrend();
+      OpenMarketOrder(current_lot,direction_buy);
+      last_entry_price = direction_buy ? SymbolInfoDouble(InpSymbol,SYMBOL_ASK)
+                                       : SymbolInfoDouble(InpSymbol,SYMBOL_BID);
+      return;
+     }
+
+   double dev = PriceDeviation(last_entry_price);
+   if(dev<=next_level && dca_count<max_dca_orders)
+     {
+      current_lot *= dca_multiplier;
+      if(OpenMarketOrder(current_lot,direction_buy))
+        {
+         last_entry_price = direction_buy ? SymbolInfoDouble(InpSymbol,SYMBOL_ASK)
+                                          : SymbolInfoDouble(InpSymbol,SYMBOL_BID);
+         next_level += -price_step;
+         dca_count++;
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Calcula la tendencia usando EMAs                                  |
+//+------------------------------------------------------------------+
+void GetTrend()
+  {
+   int handle5 = iMA(InpSymbol,timeframe,5,0,MODE_EMA,PRICE_CLOSE);
+   int handle8 = iMA(InpSymbol,timeframe,8,0,MODE_EMA,PRICE_CLOSE);
+   double ema5[],ema8[];
+   if(CopyBuffer(handle5,0,0,2,ema5)<=0 || CopyBuffer(handle8,0,0,2,ema8)<=0)
+      return;
+   direction_buy = ema5[0] > ema8[0];
+   IndicatorRelease(handle5);
+   IndicatorRelease(handle8);
+  }
+
+//+------------------------------------------------------------------+
+//| Obtiene el porcentaje de beneficio actual                         |
+//+------------------------------------------------------------------+
+double CurrentProfitPct()
+  {
+   double margin_sum=0.0;
+   double profit=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      if(PositionGetTicket(i)!=0 && PositionGetString(POSITION_SYMBOL)==InpSymbol)
+        {
+         double vol = PositionGetDouble(POSITION_VOLUME);
+         double price = PositionGetDouble(POSITION_PRICE_OPEN);
+         int type = (int)PositionGetInteger(POSITION_TYPE);
+         double margin=0.0;
+         if(OrderCalcMargin(type==POSITION_TYPE_BUY?ORDER_TYPE_BUY:ORDER_TYPE_SELL,
+                            InpSymbol,vol,price,margin))
+            margin_sum+=margin;
+         profit+=PositionGetDouble(POSITION_PROFIT);
+        }
+     }
+   if(margin_sum==0.0)
+      return(0.0);
+  return(profit/margin_sum*100.0);
+ }
+
+//+------------------------------------------------------------------+
+//| Profit relative to account balance                               |
+//+------------------------------------------------------------------+
+double CurrentProfitPctBalance()
+  {
+   double profit=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      if(PositionGetTicket(i)!=0 && PositionGetString(POSITION_SYMBOL)==InpSymbol)
+         profit+=PositionGetDouble(POSITION_PROFIT);
+     }
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   if(balance==0.0)
+      return(0.0);
+   return(profit/balance*100.0);
+  }
+
+//+------------------------------------------------------------------+
+//| Abre una orden de mercado                                         |
+//+------------------------------------------------------------------+
+bool OpenMarketOrder(double volume,bool buy)
+  {
+   MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+   req.action=TRADE_ACTION_DEAL;
+   req.symbol=InpSymbol;
+   req.volume=volume;
+   req.type=buy?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   req.price=buy?SymbolInfoDouble(InpSymbol,SYMBOL_ASK):SymbolInfoDouble(InpSymbol,SYMBOL_BID);
+   req.deviation=20;
+   req.magic=100;
+   req.type_filling=ORDER_FILLING_IOC;
+   req.comment="dca bot";
+   if(!OrderSend(req,res))
+     {
+      Print("OrderSend failed: ",GetLastError());
+      return(false);
+     }
+   if(res.retcode!=TRADE_RETCODE_DONE)
+     {
+      Print("OrderSend retcode: ",res.retcode);
+      return(false);
+     }
+   return(true);
+  }
+
+//+------------------------------------------------------------------+
+//| Returns deviation from reference price                              |
+//+------------------------------------------------------------------+
+double PriceDeviation(double reference_price)
+  {
+   double current = direction_buy?SymbolInfoDouble(InpSymbol,SYMBOL_ASK)
+                                 :SymbolInfoDouble(InpSymbol,SYMBOL_BID);
+   double dev = (current-reference_price)/reference_price*100.0;
+   return direction_buy?dev:-dev;
+  }
+
+//+------------------------------------------------------------------+
+//| Closes all open positions                                         |
+//+------------------------------------------------------------------+
+void CloseAll()
+  {
+   for(int i=PositionsTotal()-1;i>=0;i--)
+     {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=InpSymbol) continue;
+      int type=(int)PositionGetInteger(POSITION_TYPE);
+      double volume=PositionGetDouble(POSITION_VOLUME);
+      MqlTradeRequest req; MqlTradeResult res; ZeroMemory(req); ZeroMemory(res);
+      req.action=TRADE_ACTION_DEAL;
+      req.position=ticket;
+      req.symbol=InpSymbol;
+      req.volume=volume;
+      req.type=type==POSITION_TYPE_BUY?ORDER_TYPE_SELL:ORDER_TYPE_BUY;
+      req.price=type==POSITION_TYPE_BUY?SymbolInfoDouble(InpSymbol,SYMBOL_BID):SymbolInfoDouble(InpSymbol,SYMBOL_ASK);
+      req.deviation=20;
+      req.magic=100;
+      req.type_filling=ORDER_FILLING_IOC;
+      req.comment="close";
+      OrderSend(req,res);
+     }
+  }
