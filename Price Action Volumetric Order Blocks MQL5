@@ -1,0 +1,307 @@
+//+------------------------------------------------------------------+
+//|                                      PriceActionVolumetricOrderBlocks.mq5 |
+//|                        Converted from Pine Script by UAlgo               |
+//+------------------------------------------------------------------+
+#property copyright "Converted indicator"
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_plots 0
+#property strict
+#include <Arrays/ArrayObj.mqh>
+
+input int    swingLength    = 8;          // Swing Length
+input int    showLastXOb    = 4;          // Show Last X Order Blocks
+input bool   useCloseCheck  = false;      // Violation by close instead of wick
+input bool   hideOverlap    = true;       // Hide overlapping order blocks
+input color  upObColor      = clrTeal;    // Bullish color
+input color  downObColor    = clrRed;     // Bearish color
+
+struct Swing
+  {
+   double     y;
+   datetime   x;
+   bool       crossed;
+  };
+
+class OB : public CObject
+  {
+public:
+   double     top;
+   double     btm;
+   datetime   barStart;
+   double     bullishStr;
+   double     bearishStr;
+   long       vol;
+   bool       broken;
+   string     name;
+  };
+
+//--- arrays to store order blocks
+CArrayObj     bullishOb;
+CArrayObj     bearishOb;
+
+Swing topp={0,0,false};
+Swing btmm={0,0,false};
+
+//+------------------------------------------------------------------+
+bool IsPivotHigh(const double &high[],int index)
+  {
+   for(int i=1;i<=swingLength;i++)
+     {
+      if(index-i<0 || index+i>=ArraySize(high))
+         return(false);
+      if(high[index]<=high[index-i] || high[index]<=high[index+i])
+         return(false);
+     }
+   return(true);
+  }
+
+bool IsPivotLow(const double &low[],int index)
+  {
+   for(int i=1;i<=swingLength;i++)
+     {
+      if(index-i<0 || index+i>=ArraySize(low))
+         return(false);
+      if(low[index]>=low[index-i] || low[index]>=low[index+i])
+         return(false);
+     }
+   return(true);
+  }
+
+void CalculateStrengths(const double &open[],const double &close[],const long &volume[],int barIndex,double &bull,double &bear)
+  {
+   bull=0;bear=0;
+   for(int i=0;i<swingLength;i++)
+     {
+      int pos=barIndex-i;
+      if(pos<0) break;
+      if(open[pos]>close[pos])
+         bear+=(double)volume[pos];
+      else
+         bull+=(double)volume[pos];
+     }
+  }
+
+bool IsOverlapping(OB *newBlock,CArrayObj &existing)
+  {
+   for(int i=0;i<existing.Total();i++)
+     {
+      OB *ex=(OB*)existing.At(i);
+      if((newBlock.top>=ex.btm && newBlock.top<=ex.top) ||
+         (newBlock.btm>=ex.btm && newBlock.btm<=ex.top))
+         return(true);
+     }
+   return(false);
+  }
+
+string NameFromTime(string prefix,datetime t)
+  {
+   // object names cannot contain spaces or punctuation, so
+   // use the numeric timestamp to build a unique identifier
+   return(prefix+IntegerToString((long)t));
+  }
+
+void DrawBox(OB &block,bool bullish)
+  {
+   string prefix=NameFromTime(bullish?"BULL":"BEAR",block.barStart);
+   block.name=prefix;
+   string bullBox=prefix+"_bull";
+   string bearBox=prefix+"_bear";
+   string obBox=prefix+"_box";
+   string sepLine=prefix+"_sep";
+
+   datetime right=TimeCurrent();
+
+   // bullish box
+   ObjectCreate(0,bullBox,OBJ_RECTANGLE,0,block.barStart,block.btm+(block.top-block.btm)/2,right,block.btm);
+   ObjectSetInteger(0,bullBox,OBJPROP_COLOR,ColorToARGB(upObColor,40));
+   ObjectSetInteger(0,bullBox,OBJPROP_BACK,true);
+   ObjectSetInteger(0,bullBox,OBJPROP_FILL,true);
+
+   // bearish box
+   ObjectCreate(0,bearBox,OBJ_RECTANGLE,0,block.barStart,block.top,right,block.btm+(block.top-block.btm)/2);
+   ObjectSetInteger(0,bearBox,OBJPROP_COLOR,ColorToARGB(downObColor,40));
+   ObjectSetInteger(0,bearBox,OBJPROP_BACK,true);
+   ObjectSetInteger(0,bearBox,OBJPROP_FILL,true);
+
+   // main box
+   ObjectCreate(0,obBox,OBJ_RECTANGLE,0,block.barStart,block.top,right,block.btm);
+   ObjectSetInteger(0,obBox,OBJPROP_COLOR,ColorToARGB(clrGray,80));
+   ObjectSetInteger(0,obBox,OBJPROP_BACK,true);
+   ObjectSetInteger(0,obBox,OBJPROP_FILL,true);
+
+   // separator line
+   ObjectCreate(0,sepLine,OBJ_TREND,0,block.barStart,block.btm+(block.top-block.btm)/2,right,block.btm+(block.top-block.btm)/2);
+   ObjectSetInteger(0,sepLine,OBJPROP_COLOR,ColorToARGB(clrGray,50));
+   ObjectSetInteger(0,sepLine,OBJPROP_STYLE,STYLE_DASH);
+
+  }
+
+void DeleteBox(OB *block)
+  {
+   string prefix=block.name;
+   ObjectDelete(0,prefix+"_bull");
+   ObjectDelete(0,prefix+"_bear");
+   ObjectDelete(0,prefix+"_box");
+   ObjectDelete(0,prefix+"_sep");
+  }
+
+void UpdateBoxes(CArrayObj &arr,bool bullish,const double &open[],const double &close[],const double &high[],const double &low[])
+  {
+   for(int i=0;i<arr.Total();i++)
+     {
+      OB *block=(OB*)arr.At(i);
+      datetime right=TimeCurrent();
+      // update coordinates
+      string bullBox=block.name+"_bull";
+      string bearBox=block.name+"_bear";
+      string obBox=block.name+"_box";
+      string sepLine=block.name+"_sep";
+
+      ObjectSetInteger(0,bullBox,OBJPROP_TIME,1,right);
+      ObjectSetInteger(0,bearBox,OBJPROP_TIME,1,right);
+      ObjectSetInteger(0,obBox,OBJPROP_TIME,1,right);
+      ObjectSetInteger(0,sepLine,OBJPROP_TIME,1,right);
+
+      // violation check
+      bool violation=false;
+      if(bullish)
+        {
+         if(!useCloseCheck)
+            violation=(low[0]<block.btm);
+         else
+            violation=(close[0]<block.btm);
+        }
+      else
+        {
+         if(!useCloseCheck)
+            violation=(high[0]>block.top);
+         else
+            violation=(close[0]>block.top);
+        }
+      if(violation)
+        {
+         DeleteBox(block);
+         arr.Delete(i);
+         delete block;
+         i--; // adjust index after deletion
+         continue;
+        }
+     }
+  }
+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+  {
+   ArraySetAsSeries(open,true);
+   ArraySetAsSeries(close,true);
+   ArraySetAsSeries(high,true);
+   ArraySetAsSeries(low,true);
+   ArraySetAsSeries(volume,true);
+   ArraySetAsSeries(time,true);
+
+   // detect new pivot highs/lows
+   if(rates_total>2*swingLength)
+     {
+      if(IsPivotHigh(high,swingLength))
+        {
+         topp.x=time[swingLength];
+         topp.y=high[swingLength];
+         topp.crossed=false;
+        }
+      if(IsPivotLow(low,swingLength))
+        {
+         btmm.x=time[swingLength];
+         btmm.y=low[swingLength];
+         btmm.crossed=false;
+        }
+     }
+
+   // crossing conditions
+   if(btmm.y!=0 && close[0]<btmm.y && !btmm.crossed)
+     {
+      btmm.crossed=true;
+      double h=0,l=0;datetime t=0;int idx=-1;long vol=0;
+      for(int i=1;i<=swingLength && i<rates_total;i++)
+        {
+         if(close[i]>open[i] && high[i]>h)
+           {
+            h=high[i];
+            l=low[i];
+            t=time[i];
+            vol=volume[i];
+            idx=i;
+           }
+        }
+      if(idx!=-1)
+        {
+         double bull,bear;
+         CalculateStrengths(open,close,volume,idx,bull,bear);
+         OB *nb=new OB;
+         nb.top=h;nb.btm=l;nb.barStart=t;nb.bullishStr=bull;nb.bearishStr=bear;nb.vol=vol;nb.broken=false;
+         if(!hideOverlap || !IsOverlapping(nb,bearishOb))
+           {
+            DrawBox(*nb,false);
+            bearishOb.Add(nb);
+            if(bearishOb.Total()>showLastXOb)
+              {
+               OB *old=(OB*)bearishOb.At(0);
+               DeleteBox(old);
+               bearishOb.Delete(0);
+               delete old;
+              }
+           }
+         else delete nb;
+        }
+     }
+   if(topp.y!=0 && close[0]>topp.y && !topp.crossed)
+     {
+      topp.crossed=true;
+      double h=0,l=DBL_MAX;datetime t=0;int idx=-1;long vol=0;
+      for(int i=1;i<=swingLength && i<rates_total;i++)
+        {
+         if(close[i]<open[i] && low[i]<l)
+           {
+            l=low[i];
+            h=high[i];
+            t=time[i];
+            vol=volume[i];
+            idx=i;
+           }
+        }
+      if(idx!=-1)
+        {
+         double bull,bear;
+         CalculateStrengths(open,close,volume,idx,bull,bear);
+         OB *nb=new OB;
+         nb.top=h;nb.btm=l;nb.barStart=t;nb.bullishStr=bull;nb.bearishStr=bear;nb.vol=vol;nb.broken=false;
+         if(!hideOverlap || !IsOverlapping(nb,bullishOb))
+           {
+            DrawBox(*nb,true);
+            bullishOb.Add(nb);
+            if(bullishOb.Total()>showLastXOb)
+              {
+               OB *old=(OB*)bullishOb.At(0);
+               DeleteBox(old);
+               bullishOb.Delete(0);
+               delete old;
+              }
+           }
+         else delete nb;
+        }
+     }
+
+   // update existing boxes
+   UpdateBoxes(bullishOb,true,open,close,high,low);
+   UpdateBoxes(bearishOb,false,open,close,high,low);
+
+   return(rates_total);
+  }
