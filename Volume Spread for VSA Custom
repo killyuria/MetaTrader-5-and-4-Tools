@@ -1,0 +1,141 @@
+// © theehoganator
+//@version=5
+
+indicator(title="Volume Spread Analysis Custom", shorttitle="Volume", overlay=false, precision = 2, format=format.volume) // precision = 2
+
+
+
+
+//------------------------------------------------------------------------ // ***** Colors ***** \\ ------------------------------------------------------------------------\\
+
+
+Black   = #000000,      Charcoal= #363A45,      Gray    = #787B86,      Silver  = #C0C0C0,      White   = #FFFFFF
+Brown   = #A52A2A,      Red     = #FF0000,      Pink    = #FF69B4,      Gold    = #D4AF37,      Orange  = #FF6A00,      Yellow  = #FFFF00
+Green   = #00AF00,      Teal    = #008080,      Lime    = #00FF0B       // Green = #008000
+Navy    = #413BB2,      Blue    = #0094FF,      Aqua    = #00BCD4       // Aqua  = #00FFFF
+Purple  = #800080,      Fucshia = #E040FB   //#FF00FF
+
+None = color.new(Black, 100)    // Having this is useful in limited situations where "na" will not work as a color. Check my Donchian indicator for an example of that
+
+
+
+
+
+
+
+
+//------------------------------------------------------------------------ // ***** Inputs ***** \\ ------------------------------------------------------------------------\\
+
+ma0_length = input.int(30, "Moving Average", minval=1, inline="Moving Average")
+ma(source, length, type) =>
+    switch type
+        "SMA" => ta.sma(source, length)
+        "EMA" => ta.ema(source, length)
+        "SMMA (RMA)" => ta.rma(source, length)
+        "WMA" => ta.wma(source, length)
+        "VWMA" => ta.vwma(source, length)
+
+maTypeInput = input.string("SMA", title="", options=["SMA", "EMA", "SMMA (RMA)", "WMA", "VWMA"], inline="Moving Average")
+
+
+
+ma1_length = input.float(0.5, "", minval=0.01, inline="Moving Average Multipliers")
+ma2_length = input.float(1.5, "", minval=0.01, inline="Moving Average Multipliers")
+ma3_length = input.float(3.0, "", minval=0.01, inline="Moving Average Multipliers")
+
+bColorAnalysis = input.bool(false, "Color Analysis", inline="Analysis")
+bDrawAverages  = input.bool(false, "Draw Analysis",  inline="Analysis")
+iStyle         = input.string(defval="Histogram", title="", options=["Histogram", "Columns"], inline = "Analysis") // plot style
+
+Style = iStyle == "Histogram" ? plot.style_histogram : plot.style_columns
+
+
+
+
+
+//------------------------------------------------------------------------ // ***** Calculations ***** \\ ------------------------------------------------------------------------\\
+
+ma0 = ma(volume, ma0_length, maTypeInput)
+ma1 = ma0 * ma1_length
+ma2 = ma0 * ma2_length
+ma3 = ma0 * ma3_length
+
+
+
+    // Need this plot value to fill in from 0 to ma1, fill function doesn't allow us to simply say fill from a value of 0 to another value
+    // I just made this have a value of 0, called it the Baseline, set it as not able to be edited and do not display as it is unnecessary to draw it
+    
+plot0 = plot(0, title="Baseline", color=None, linewidth=1, editable=false, display=display.none) 
+
+
+
+
+
+
+
+//------------------------------------------------------------------------ // ***** Assign Colors ***** \\ ------------------------------------------------------------------------\\
+
+
+        // By default it uses the same colors as the regular Volumne indicator given by TradingView (Green == #26a69a and Red == #ef5350)
+        // If you enable the Color Analysis check box it will change the volume bars so that they are based on relative volume:
+        // Low = Navy       Medium = Green      High = Yellow       Very High = Red
+        
+histColor = not bColorAnalysis ? (close > close[1] ? color.new(#26a69a, 25) : color.new(#ef5350, 25)) : 
+  volume < ma1 ? Navy   :
+  volume < ma2 ? Green  : 
+  volume < ma3 ? Yellow : 
+  volume > ma3 ? Red    : 
+  Gray                              // Always have a default value in case something happens you didn't plan for or to show bugs in the code :)
+
+
+fillColor1 = color.new(Black,  90)  // color.new(Red,    50)        I actually like just making this yellow like the one below, but I'll leave that up to you
+fillColor2 = color.new(Yellow, 90)
+fillColor3 = color.new(Red,    50)
+
+
+
+
+
+
+
+
+//------------------------------------------------------------------------ // ***** Plot Everything ***** \\ ------------------------------------------------------------------------\\
+
+
+    // Get in the habbit of not only plotting a value but creating a variable for which that plot is a value.
+    // This is important when trying to use the Fill function as it will not take the ma0 value, it must be a set of plot() or hline() values
+    // So, I make the plot(ma0...) function into a value called ma0plot and then pass that through the fill function later. 
+    
+
+ma0plot = plot(ma0,    title="Moving Average 0", color=Blue)    // If you plot this after plotting volume, it draws over the bars not under them; which is useful if using columns instead of histogram plot style
+
+
+ma1plot = plot(bDrawAverages ? ma1 : na,    title="Moving Average 1", color=color.new(Red, 100))    // In my code, I set these colors to color.new(Red, 100) so I don't see them but they still show the value in on the left side by the indicator name
+ma2plot = plot(bDrawAverages ? ma2 : na,    title="Moving Average 2", color=color.new(Red, 100))    // The fill color essentially already shows the line, why draw it as well. I think it looks cleaner when it's off
+ma3plot = plot(bDrawAverages ? ma3 : na,    title="Moving Average 3", color=color.new(Red, 100))
+
+
+fill(plot0,    ma1plot,  title = "Low  Volume Background",  color = fillColor1) // Here is where we used that plot0 value to fill!
+fill(ma1plot,  ma2plot,  title = "Med  Volume Background",  color = fillColor2) 
+fill(ma2plot,  ma3plot,  title = "High Volume Background",  color = fillColor3) 
+
+
+
+volplot  = plot(volume, title='Volume',  color=histColor, style=Style, histbase=0, linewidth=3) // style=plot.style_columns        style=plot.style_histogram
+
+
+
+
+    // If you want a black border around your candles like the original, uncomment this line below and comment out the volplot line above. I don't like to because it adds three more values next to the name
+    
+// plotcandle(0, volume, 0, volume, "Volume", color=histColor, wickcolor=None, bordercolor=Black)
+
+
+
+
+
+
+
+
+
+// I always put a bunch of extra space at the end, it's easier on the eyes to work with the last line of code without having it touching the bottom of the screen, at least for me.
