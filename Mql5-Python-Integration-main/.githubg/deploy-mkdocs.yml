@@ -1,0 +1,52 @@
+name: Deploy | Deploy MkDocs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['main']
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install the dependencies
+        run: |
+            pip install `
+            "mkdocs>=1.6.1" `
+            "mkdocs-gen-files>=0.5.0" `
+            "mkdocs-jupyter>=0.25.1" `
+            "mkdocs-literate-nav>=0.6.2" `
+            "mkdocs-material>=9.6.12" `
+            "mkdocs-section-index>=0.3.10" `
+            "mkdocstrings[python]>=0.29.1"
+
+      - name: Build MkDocs
+        run: mkdocs build --site-dir ./deploy
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './deploy'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
