@@ -1,16 +1,14 @@
 //+------------------------------------------------------------------+
 //|                                          GoldRangeBreakout.mq5   |
-//|                         Gold Range Breakout Strategy              |
+//|                         Gold Range Breakout Strategy v3.0         |
 //|                         Timeframe: 5 min - XAUUSD                |
 //+------------------------------------------------------------------+
 #property copyright   "Gold Range Breakout Bot"
 #property link        ""
-#property version     "2.00"
+#property version     "3.00"
 #property strict
-#property description "Range breakout strategy for Gold (XAUUSD)."
-#property description "Marks a range during a configurable NY session window,"
-#property description "places Buy Stop / Sell Stop at range extremes,"
-#property description "OCO logic, optional Break-Even, and configurable TP in R multiples."
+#property description "Range breakout strategy for Gold (XAUUSD) v3.0"
+#property description "Trend filter, entry buffer, partial close, trailing stop."
 
 #include <Trade/Trade.mqh>
 
@@ -23,14 +21,39 @@ input int    InpRangeStartMinute = 30;   // Range Start Minute
 input int    InpRangeEndHour     = 7;    // Range End Hour (NY Time)
 input int    InpRangeEndMinute   = 45;   // Range End Minute
 input int    InpBrokerGMTOffset  = 2;    // Broker GMT Offset (hours, e.g. 2 for UTC+2)
+input int    InpDeletePendingHour   = 10; // Hour (NY) to delete unfilled orders
+input int    InpDeletePendingMinute = 0;  // Minute to delete unfilled orders
 
 input group "=== Trade Settings ==="
-input double InpLotSize          = 0.10; // Lot Size
+input double InpLotSize          = 0.01; // Lot Size
 input double InpTPMultiplier     = 3.0;  // Take Profit (R multiples)
+input double InpEntryBuffer      = 0.50; // Entry Buffer above/below range (price units, e.g. 0.50 for gold)
 input bool   InpUseBreakEven     = true; // Enable Break-Even at 1:1
-input int    InpDeletePendingHour   = 10; // Hour (NY) to delete unfilled pending orders
-input int    InpDeletePendingMinute = 0;  // Minute to delete unfilled pending orders
-input int    InpMaxSpreadPoints  = 50;   // Max Spread to Place Orders (points, 0=disabled)
+input int    InpMaxSpreadPoints  = 50;   // Max Spread (points, 0=disabled)
+
+input group "=== Trend Filter (Higher Timeframe) ==="
+input bool   InpUseTrendFilter   = true;  // Enable Trend Filter
+input ENUM_TIMEFRAMES InpTrendTF = PERIOD_H1; // Trend Timeframe
+input int    InpEMAPeriod        = 200;   // EMA Period for Trend
+input ENUM_TIMEFRAMES InpFastTrendTF = PERIOD_M15; // Fast Trend Timeframe
+input int    InpFastEMAPeriod    = 50;    // Fast EMA Period
+
+input group "=== Range Size Filters ==="
+input double InpMinRangePoints   = 30;    // Minimum Range Size (points)
+input double InpMaxRangePoints   = 500;   // Maximum Range Size (points)
+
+input group "=== Partial Close & Trailing ==="
+input bool   InpUsePartialClose  = true;  // Enable Partial Close at 1R
+input double InpPartialPercent   = 50.0;  // Partial Close Percentage (%)
+input bool   InpUseTrailingStop  = true;  // Enable Trailing Stop (after 1R)
+input double InpTrailingRMultiple = 1.0;  // Trail distance in R multiples
+
+input group "=== Day of Week Filter ==="
+input bool   InpTradeMonday      = true;  // Trade Monday
+input bool   InpTradeTuesday     = true;  // Trade Tuesday
+input bool   InpTradeWednesday   = true;  // Trade Wednesday
+input bool   InpTradeThursday    = true;  // Trade Thursday
+input bool   InpTradeFriday      = true;  // Trade Friday
 
 input group "=== Visual Settings ==="
 input color  InpRangeColor       = clrDodgerBlue; // Range Box Color
@@ -43,16 +66,16 @@ input ulong  InpMagicNumber      = 777777; // Magic Number
 input int    InpSlippage         = 30;     // Slippage (points)
 
 //+------------------------------------------------------------------+
-//| Enums for state machine                                           |
+//| State Machine                                                     |
 //+------------------------------------------------------------------+
 enum ENUM_RANGE_STATE
   {
-   STATE_WAITING_FOR_RANGE,     // Waiting for range window to start
-   STATE_BUILDING_RANGE,        // Inside range window, collecting H/L
-   STATE_RANGE_COMPLETE,        // Range formed, need to place orders
-   STATE_ORDERS_PLACED,         // Pending orders placed, waiting for trigger
-   STATE_TRADE_ACTIVE,          // One order triggered, managing position
-   STATE_DONE_FOR_DAY           // Done for today
+   STATE_WAITING_FOR_RANGE,
+   STATE_BUILDING_RANGE,
+   STATE_RANGE_COMPLETE,
+   STATE_ORDERS_PLACED,
+   STATE_TRADE_ACTIVE,
+   STATE_DONE_FOR_DAY
   };
 
 //+------------------------------------------------------------------+
@@ -62,102 +85,18 @@ CTrade            trade;
 ENUM_RANGE_STATE  g_state;
 double            g_rangeHigh;
 double            g_rangeLow;
+double            g_rangeSize;
 datetime          g_rangeStartTime;
 datetime          g_rangeEndTime;
 ulong             g_buyTicket;
 ulong             g_sellTicket;
 bool              g_breakEvenApplied;
+bool              g_partialClosed;
 int               g_lastDay;
 string            g_objPrefix;
-
-//+------------------------------------------------------------------+
-//| Convert NY time (hour:minute) to broker server time for today     |
-//| Uses a fixed broker GMT offset (input) instead of TimeGMT()      |
-//| which does NOT work in the strategy tester.                       |
-//|                                                                   |
-//| NY is UTC-5 (EST) or UTC-4 (EDT).                                |
-//| Formula: broker_time = ny_time + ny_to_utc + utc_to_broker       |
-//|        = ny_time + (5 or 4) + InpBrokerGMTOffset                 |
-//+------------------------------------------------------------------+
-datetime NYTimeToBroker(int nyHour, int nyMinute)
-  {
-   MqlDateTime dt;
-   TimeCurrent(dt);
-
-// Determine if US DST is active for the current broker date
-   bool isDST = IsUSDST(dt.year, dt.mon, dt.day);
-
-// NY to UTC offset: +5 in winter (EST), +4 in summer (EDT)
-   int nyToUTC = isDST ? 4 : 5;
-
-// Total shift from NY to broker
-   int totalShiftHours = nyToUTC + InpBrokerGMTOffset;
-
-// Build broker datetime
-   dt.hour = nyHour + totalShiftHours;
-   dt.min  = nyMinute;
-   dt.sec  = 0;
-
-// Handle hour overflow (next day)
-   while(dt.hour >= 24)
-     {
-      dt.hour -= 24;
-      // We don't adjust the day because the range should be same-day
-      // If broker is far ahead, this naturally works
-     }
-
-   return StructToTime(dt);
-  }
-
-//+------------------------------------------------------------------+
-//| Determine if US DST is active (Second Sun Mar - First Sun Nov)    |
-//+------------------------------------------------------------------+
-bool IsUSDST(int year, int month, int day)
-  {
-   if(month > 3 && month < 11)
-      return true;
-   if(month < 3 || month > 11)
-      return false;
-
-   if(month == 3)
-     {
-      // Second Sunday of March
-      // Find day-of-week of March 1st
-      int dow1 = DayOfWeek(year, 3, 1);
-      // First Sunday: if March 1 is Sunday, it's day 1. Otherwise 8-dow1
-      int firstSunday = (dow1 == 0) ? 1 : (8 - dow1);
-      int secondSunday = firstSunday + 7;
-      return (day >= secondSunday);
-     }
-
-   if(month == 11)
-     {
-      // First Sunday of November
-      int dow1 = DayOfWeek(year, 11, 1);
-      int firstSunday = (dow1 == 0) ? 1 : (8 - dow1);
-      return (day < firstSunday);
-     }
-
-   return false;
-  }
-
-//+------------------------------------------------------------------+
-//| Zeller-based day of week (0=Sunday, 1=Monday, ..., 6=Saturday)   |
-//+------------------------------------------------------------------+
-int DayOfWeek(int year, int month, int day)
-  {
-   if(month < 3)
-     {
-      month += 12;
-      year--;
-     }
-   int k = year % 100;
-   int j = year / 100;
-   int h = (day + (13 * (month + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-   // Zeller: h=0 is Saturday, h=1 is Sunday, etc.
-   int dow = ((h + 6) % 7); // Convert: 0=Sunday
-   return dow;
-  }
+int               g_trendEMAHandle;
+int               g_fastEMAHandle;
+int               g_trendDirection; // 1=bullish, -1=bearish, 0=neutral
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                    |
@@ -170,11 +109,25 @@ int OnInit()
 
    g_objPrefix = "GRB_" + IntegerToString(InpMagicNumber) + "_";
 
+// Create EMA indicators for trend filter
+   if(InpUseTrendFilter)
+     {
+      g_trendEMAHandle = iMA(_Symbol, InpTrendTF, InpEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      g_fastEMAHandle  = iMA(_Symbol, InpFastTrendTF, InpFastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(g_trendEMAHandle == INVALID_HANDLE || g_fastEMAHandle == INVALID_HANDLE)
+        {
+         Print("Failed to create EMA indicators!");
+         return(INIT_FAILED);
+        }
+     }
+
    ResetDailyState();
    g_lastDay = -1;
 
-   Print("GoldRangeBreakout v2.0 initialized. Magic=", InpMagicNumber,
-         " BrokerGMT=", InpBrokerGMTOffset);
+   Print("GoldRangeBreakout v3.0 initialized. Magic=", InpMagicNumber,
+         " BrokerGMT=", InpBrokerGMTOffset,
+         " TrendFilter=", InpUseTrendFilter,
+         " PartialClose=", InpUsePartialClose);
    return(INIT_SUCCEEDED);
   }
 
@@ -183,6 +136,11 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
   {
+   if(g_trendEMAHandle != INVALID_HANDLE)
+      IndicatorRelease(g_trendEMAHandle);
+   if(g_fastEMAHandle != INVALID_HANDLE)
+      IndicatorRelease(g_fastEMAHandle);
+
    if(reason == REASON_REMOVE || reason == REASON_RECOMPILE)
      {
       ObjectsDeleteAll(0, g_objPrefix);
@@ -191,18 +149,21 @@ void OnDeinit(const int reason)
   }
 
 //+------------------------------------------------------------------+
-//| Reset daily state variables                                       |
+//| Reset daily state                                                 |
 //+------------------------------------------------------------------+
 void ResetDailyState()
   {
    g_state            = STATE_WAITING_FOR_RANGE;
    g_rangeHigh        = 0;
-   g_rangeLow         = 0;
+   g_rangeLow         = DBL_MAX;
+   g_rangeSize        = 0;
    g_rangeStartTime   = 0;
    g_rangeEndTime     = 0;
    g_buyTicket        = 0;
    g_sellTicket       = 0;
    g_breakEvenApplied = false;
+   g_partialClosed    = false;
+   g_trendDirection   = 0;
   }
 
 //+------------------------------------------------------------------+
@@ -214,19 +175,25 @@ void OnTick()
    MqlDateTime dtNow;
    TimeCurrent(dtNow);
 
-//--- New day detection: reset state
+//--- New day: clean up and reset
    if(dtNow.day != g_lastDay)
      {
-      // Clean up any leftover pending orders from yesterday
       CleanupPendingOrders();
       g_lastDay = dtNow.day;
       ResetDailyState();
+
+      // Check day of week filter
+      if(!IsTradingDay(dtNow.day_of_week))
+        {
+         g_state = STATE_DONE_FOR_DAY;
+         return;
+        }
      }
 
-//--- Calculate today's time windows in broker time
-   datetime rangeStart   = NYTimeToBroker(InpRangeStartHour, InpRangeStartMinute);
-   datetime rangeEnd     = NYTimeToBroker(InpRangeEndHour, InpRangeEndMinute);
-   datetime deleteTime   = NYTimeToBroker(InpDeletePendingHour, InpDeletePendingMinute);
+//--- Calculate broker times
+   datetime rangeStart = NYTimeToBroker(InpRangeStartHour, InpRangeStartMinute);
+   datetime rangeEnd   = NYTimeToBroker(InpRangeEndHour, InpRangeEndMinute);
+   datetime deleteTime = NYTimeToBroker(InpDeletePendingHour, InpDeletePendingMinute);
 
 //--- State machine
    switch(g_state)
@@ -239,33 +206,31 @@ void OnTick()
             g_rangeHigh      = 0;
             g_rangeLow       = DBL_MAX;
             g_state          = STATE_BUILDING_RANGE;
-            Print("Range window started. Collecting High/Low...");
            }
          break;
 
       case STATE_BUILDING_RANGE:
-         // Keep updating range with current tick
          UpdateRangeFromTick();
-
-         // Check if range window has ended
          if(now >= rangeEnd)
            {
-            // Final scan of completed bars to be sure
             FinalizeRange();
-
-            if(g_rangeHigh > 0 && g_rangeLow < DBL_MAX && g_rangeHigh > g_rangeLow)
+            if(ValidateRange())
               {
+               // Get trend direction BEFORE placing orders
+               if(InpUseTrendFilter)
+                  g_trendDirection = GetTrendDirection();
+
                g_state = STATE_RANGE_COMPLETE;
-               Print("Range COMPLETE: High=", DoubleToString(g_rangeHigh, _Digits),
-                     " Low=", DoubleToString(g_rangeLow, _Digits),
-                     " Size=", DoubleToString((g_rangeHigh - g_rangeLow) / _Point, 0), " pts");
+               Print("Range OK: H=", DoubleToString(g_rangeHigh, _Digits),
+                     " L=", DoubleToString(g_rangeLow, _Digits),
+                     " Size=", DoubleToString(g_rangeSize / _Point, 0), "pts",
+                     " Trend=", g_trendDirection);
 
                if(InpShowRange)
                   DrawRangeBox();
               }
             else
               {
-               Print("Range invalid or zero. Skipping today.");
                g_state = STATE_DONE_FOR_DAY;
               }
            }
@@ -276,47 +241,77 @@ void OnTick()
          break;
 
       case STATE_ORDERS_PLACED:
-         // Check if one order triggered -> cancel the other
          CheckOCO();
-
-         // Delete unfilled pending orders after cutoff time
-         if(now >= deleteTime)
+         if(g_state == STATE_ORDERS_PLACED && now >= deleteTime)
            {
-            Print("Cutoff time reached. Deleting unfilled pending orders.");
+            Print("Cutoff time. Deleting unfilled orders.");
             DeleteAllPendingOrders();
             g_state = STATE_DONE_FOR_DAY;
            }
          break;
 
       case STATE_TRADE_ACTIVE:
-         // Manage break-even
-         if(InpUseBreakEven && !g_breakEvenApplied)
-            CheckBreakEven();
-
-         // Check if position is still open
+         ManageOpenTrade();
          if(!HasOpenPosition())
            {
-            Print("Position closed. Done for today.");
             g_state = STATE_DONE_FOR_DAY;
            }
          break;
 
       case STATE_DONE_FOR_DAY:
-         // Nothing to do
          break;
      }
   }
 
 //+------------------------------------------------------------------+
-//| Update range from current tick data                               |
+//| Check if today is a trading day                                   |
+//+------------------------------------------------------------------+
+bool IsTradingDay(int dayOfWeek)
+  {
+   switch(dayOfWeek)
+     {
+      case 1: return InpTradeMonday;
+      case 2: return InpTradeTuesday;
+      case 3: return InpTradeWednesday;
+      case 4: return InpTradeThursday;
+      case 5: return InpTradeFriday;
+      default: return false; // No trading on weekends
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Get trend direction from EMA                                      |
+//| Returns: 1=bullish, -1=bearish, 0=neutral                        |
+//+------------------------------------------------------------------+
+int GetTrendDirection()
+  {
+   if(!InpUseTrendFilter)
+      return 0;
+
+   double emaValue[1];
+   double fastEmaValue[1];
+
+   if(CopyBuffer(g_trendEMAHandle, 0, 0, 1, emaValue) < 1)
+      return 0;
+   if(CopyBuffer(g_fastEMAHandle, 0, 0, 1, fastEmaValue) < 1)
+      return 0;
+
+   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+// Strong trend: price above both EMAs = bullish, below both = bearish
+   if(currentPrice > emaValue[0] && currentPrice > fastEmaValue[0])
+      return 1;   // Bullish
+   if(currentPrice < emaValue[0] && currentPrice < fastEmaValue[0])
+      return -1;  // Bearish
+
+   return 0; // Mixed / neutral - no trade
+  }
+
+//+------------------------------------------------------------------+
+//| Update range from tick                                            |
 //+------------------------------------------------------------------+
 void UpdateRangeFromTick()
   {
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double mid = (bid + ask) / 2.0;
-
-// Use high/low of current forming bar
    double barHigh = iHigh(_Symbol, PERIOD_CURRENT, 0);
    double barLow  = iLow(_Symbol, PERIOD_CURRENT, 0);
 
@@ -327,7 +322,7 @@ void UpdateRangeFromTick()
   }
 
 //+------------------------------------------------------------------+
-//| Final complete scan of all bars within the range window           |
+//| Final scan of bars within range window                            |
 //+------------------------------------------------------------------+
 void FinalizeRange()
   {
@@ -335,12 +330,8 @@ void FinalizeRange()
    for(int i = 0; i < bars; i++)
      {
       datetime barTime = iTime(_Symbol, PERIOD_CURRENT, i);
-
-      // Stop scanning past the range start
       if(barTime < g_rangeStartTime)
          break;
-
-      // Only include bars within the range window
       if(barTime >= g_rangeStartTime && barTime < g_rangeEndTime)
         {
          double h = iHigh(_Symbol, PERIOD_CURRENT, i);
@@ -352,167 +343,318 @@ void FinalizeRange()
         }
      }
 
-// Normalize
    g_rangeHigh = NormalizeDouble(g_rangeHigh, _Digits);
    g_rangeLow  = NormalizeDouble(g_rangeLow, _Digits);
+   g_rangeSize = g_rangeHigh - g_rangeLow;
   }
 
 //+------------------------------------------------------------------+
-//| Place Buy Stop and Sell Stop at range extremes                    |
+//| Validate range size                                               |
+//+------------------------------------------------------------------+
+bool ValidateRange()
+  {
+   if(g_rangeHigh <= 0 || g_rangeLow >= DBL_MAX || g_rangeHigh <= g_rangeLow)
+     {
+      Print("Range invalid.");
+      return false;
+     }
+
+   double rangePts = g_rangeSize / _Point;
+
+   if(rangePts < InpMinRangePoints)
+     {
+      Print("Range too small: ", DoubleToString(rangePts, 0),
+            "pts < ", DoubleToString(InpMinRangePoints, 0), "pts min");
+      return false;
+     }
+
+   if(rangePts > InpMaxRangePoints)
+     {
+      Print("Range too large: ", DoubleToString(rangePts, 0),
+            "pts > ", DoubleToString(InpMaxRangePoints, 0), "pts max");
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Place pending orders with trend filter and buffer                 |
 //+------------------------------------------------------------------+
 void PlacePendingOrders()
   {
-   double rangeSize = g_rangeHigh - g_rangeLow;
-
-// Minimum range validation (at least 50 points for gold)
-   if(rangeSize < _Point * 10)
-     {
-      Print("Range too small: ", DoubleToString(rangeSize / _Point, 0),
-            " pts. Skipping today.");
-      g_state = STATE_DONE_FOR_DAY;
-      return;
-     }
-
 // Check spread
    if(InpMaxSpreadPoints > 0)
      {
       long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
       if(spread > InpMaxSpreadPoints)
-        {
-         // Don't change state, retry next tick
-         return;
-        }
+         return; // Retry next tick
      }
 
-// Prices for Buy Stop
-   double buyEntry  = NormalizeDouble(g_rangeHigh, _Digits);
-   double buySL     = NormalizeDouble(g_rangeLow, _Digits);
-   double buyTP     = NormalizeDouble(buyEntry + InpTPMultiplier * rangeSize, _Digits);
-
-// Prices for Sell Stop
-   double sellEntry = NormalizeDouble(g_rangeLow, _Digits);
-   double sellSL    = NormalizeDouble(g_rangeHigh, _Digits);
-   double sellTP    = NormalizeDouble(sellEntry - InpTPMultiplier * rangeSize, _Digits);
-
-// Check minimum distance from current price (STOP_LEVEL)
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double minDist = stopLevel * _Point;
 
-// Buy Stop must be ABOVE current ask
-   if(buyEntry <= ask + minDist)
+// Entry prices WITH buffer
+   double buyEntry  = NormalizeDouble(g_rangeHigh + InpEntryBuffer, _Digits);
+   double sellEntry = NormalizeDouble(g_rangeLow - InpEntryBuffer, _Digits);
+
+// SL at opposite range extreme (NOT including buffer - SL stays at range boundary)
+   double buySL     = NormalizeDouble(g_rangeLow, _Digits);
+   double sellSL    = NormalizeDouble(g_rangeHigh, _Digits);
+
+// Risk = entry to SL (includes buffer, so slightly larger than pure range)
+   double buyRisk   = buyEntry - buySL;
+   double sellRisk  = sellSL - sellEntry;
+
+// TP based on R multiple of actual risk
+   double buyTP     = NormalizeDouble(buyEntry + InpTPMultiplier * buyRisk, _Digits);
+   double sellTP    = NormalizeDouble(sellEntry - InpTPMultiplier * sellRisk, _Digits);
+
+   bool placedAny = false;
+
+//--- Place BUY STOP (only if trend allows or no trend filter)
+   bool allowBuy = true;
+   if(InpUseTrendFilter && g_trendDirection == -1)
+      allowBuy = false; // Don't buy in bearish trend
+   if(InpUseTrendFilter && g_trendDirection == 0)
+      allowBuy = false; // Don't buy in neutral/mixed trend
+
+   if(allowBuy && buyEntry > ask + minDist)
      {
-      Print("Buy Stop entry ", DoubleToString(buyEntry, _Digits),
-            " too close to ask ", DoubleToString(ask, _Digits),
-            ". Price already broke above range. Skipping buy.");
-     }
-   else
-     {
-      bool buyResult = trade.BuyStop(InpLotSize, buyEntry, _Symbol, buySL, buyTP,
-                                     ORDER_TIME_GTC, 0, "GRB Buy");
-      if(buyResult)
+      bool ok = trade.BuyStop(InpLotSize, buyEntry, _Symbol, buySL, buyTP,
+                              ORDER_TIME_GTC, 0, "GRB Buy");
+      if(ok)
         {
          g_buyTicket = trade.ResultOrder();
-         Print("BUY STOP placed #", g_buyTicket,
+         Print("BUY STOP #", g_buyTicket,
                " Entry=", DoubleToString(buyEntry, _Digits),
                " SL=", DoubleToString(buySL, _Digits),
-               " TP=", DoubleToString(buyTP, _Digits));
+               " TP=", DoubleToString(buyTP, _Digits),
+               " Risk=", DoubleToString(buyRisk / _Point, 0), "pts");
+         placedAny = true;
         }
       else
-        {
-         Print("FAILED Buy Stop. Error=", GetLastError(),
-               " Entry=", DoubleToString(buyEntry, _Digits),
-               " Ask=", DoubleToString(ask, _Digits));
-        }
+         Print("FAILED BuyStop. Err=", GetLastError());
      }
+   else if(!allowBuy)
+      Print("BUY filtered by trend (direction=", g_trendDirection, ")");
 
-// Sell Stop must be BELOW current bid
-   if(sellEntry >= bid - minDist)
+//--- Place SELL STOP (only if trend allows or no trend filter)
+   bool allowSell = true;
+   if(InpUseTrendFilter && g_trendDirection == 1)
+      allowSell = false; // Don't sell in bullish trend
+   if(InpUseTrendFilter && g_trendDirection == 0)
+      allowSell = false; // Don't sell in neutral/mixed trend
+
+   if(allowSell && sellEntry < bid - minDist)
      {
-      Print("Sell Stop entry ", DoubleToString(sellEntry, _Digits),
-            " too close to bid ", DoubleToString(bid, _Digits),
-            ". Price already broke below range. Skipping sell.");
-     }
-   else
-     {
-      bool sellResult = trade.SellStop(InpLotSize, sellEntry, _Symbol, sellSL, sellTP,
-                                       ORDER_TIME_GTC, 0, "GRB Sell");
-      if(sellResult)
+      bool ok = trade.SellStop(InpLotSize, sellEntry, _Symbol, sellSL, sellTP,
+                               ORDER_TIME_GTC, 0, "GRB Sell");
+      if(ok)
         {
          g_sellTicket = trade.ResultOrder();
-         Print("SELL STOP placed #", g_sellTicket,
+         Print("SELL STOP #", g_sellTicket,
                " Entry=", DoubleToString(sellEntry, _Digits),
                " SL=", DoubleToString(sellSL, _Digits),
-               " TP=", DoubleToString(sellTP, _Digits));
+               " TP=", DoubleToString(sellTP, _Digits),
+               " Risk=", DoubleToString(sellRisk / _Point, 0), "pts");
+         placedAny = true;
         }
       else
-        {
-         Print("FAILED Sell Stop. Error=", GetLastError(),
-               " Entry=", DoubleToString(sellEntry, _Digits),
-               " Bid=", DoubleToString(bid, _Digits));
-        }
+         Print("FAILED SellStop. Err=", GetLastError());
      }
+   else if(!allowSell)
+      Print("SELL filtered by trend (direction=", g_trendDirection, ")");
 
-// If at least one order was placed, move to next state
-   if(g_buyTicket > 0 || g_sellTicket > 0)
-     {
+   if(placedAny)
       g_state = STATE_ORDERS_PLACED;
-     }
    else
      {
-      Print("No orders placed. Price may have already broken the range.");
+      Print("No orders placed (filtered or price already broke range).");
       g_state = STATE_DONE_FOR_DAY;
      }
   }
 
 //+------------------------------------------------------------------+
-//| OCO: When one order triggers, cancel the other                    |
+//| OCO Logic                                                         |
 //+------------------------------------------------------------------+
 void CheckOCO()
   {
    bool buyPending  = (g_buyTicket > 0)  && OrderExists(g_buyTicket);
    bool sellPending = (g_sellTicket > 0) && OrderExists(g_sellTicket);
 
-// If buy order is no longer pending
    if(g_buyTicket > 0 && !buyPending)
      {
-      // It was triggered or expired/deleted
       if(HasOpenPosition())
         {
-         Print("BUY triggered. Cancelling SELL pending.");
-         // Cancel sell stop
          if(sellPending)
             trade.OrderDelete(g_sellTicket);
          g_state = STATE_TRADE_ACTIVE;
+         Print("BUY triggered -> SELL cancelled.");
          return;
         }
      }
 
-// If sell order is no longer pending
    if(g_sellTicket > 0 && !sellPending)
      {
       if(HasOpenPosition())
         {
-         Print("SELL triggered. Cancelling BUY pending.");
-         // Cancel buy stop
          if(buyPending)
             trade.OrderDelete(g_buyTicket);
          g_state = STATE_TRADE_ACTIVE;
+         Print("SELL triggered -> BUY cancelled.");
          return;
         }
      }
 
-// If both pending orders are gone and no position, done for day
    if(!buyPending && !sellPending && !HasOpenPosition())
      {
-      Print("Both pending orders gone with no position. Done for day.");
       g_state = STATE_DONE_FOR_DAY;
      }
   }
 
 //+------------------------------------------------------------------+
-//| Check if a pending order still exists                             |
+//| Manage open trade: partial close, BE, trailing                    |
+//+------------------------------------------------------------------+
+void ManageOpenTrade()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl        = PositionGetDouble(POSITION_SL);
+      double tp        = PositionGetDouble(POSITION_TP);
+      double volume    = PositionGetDouble(POSITION_VOLUME);
+      long   posType   = PositionGetInteger(POSITION_TYPE);
+
+      double riskSize = MathAbs(openPrice - sl);
+      if(riskSize < _Point)
+         continue;
+
+      if(posType == POSITION_TYPE_BUY)
+        {
+         double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         double profitDist = currentBid - openPrice;
+         double profitR    = profitDist / riskSize;
+
+         //--- Partial close at 1R
+         if(InpUsePartialClose && !g_partialClosed && profitR >= 1.0)
+           {
+            double closeVol = NormalizeVolume(volume * InpPartialPercent / 100.0);
+            if(closeVol > 0 && closeVol < volume)
+              {
+               if(trade.PositionClosePartial(ticket, closeVol))
+                 {
+                  Print("PARTIAL CLOSE BUY ", DoubleToString(InpPartialPercent, 0),
+                        "% at 1R. Closed=", DoubleToString(closeVol, 2));
+                  g_partialClosed = true;
+                 }
+              }
+           }
+
+         //--- Break-even at 1R
+         if(InpUseBreakEven && !g_breakEvenApplied && profitR >= 1.0 && sl < openPrice)
+           {
+            double newSL = NormalizeDouble(openPrice, _Digits);
+            if(trade.PositionModify(ticket, newSL, tp))
+              {
+               Print("BE BUY #", ticket, " SL->", DoubleToString(newSL, _Digits));
+               g_breakEvenApplied = true;
+              }
+           }
+
+         //--- Trailing stop (after BE is set)
+         if(InpUseTrailingStop && g_breakEvenApplied && profitR >= 1.5)
+           {
+            double trailDist = InpTrailingRMultiple * riskSize;
+            double trailSL = NormalizeDouble(currentBid - trailDist, _Digits);
+            if(trailSL > sl && trailSL > openPrice)
+              {
+               if(trade.PositionModify(ticket, trailSL, tp))
+                  Print("TRAIL BUY SL->", DoubleToString(trailSL, _Digits));
+              }
+           }
+        }
+      else if(posType == POSITION_TYPE_SELL)
+        {
+         double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         double profitDist = openPrice - currentAsk;
+         double profitR    = profitDist / riskSize;
+
+         //--- Partial close at 1R
+         if(InpUsePartialClose && !g_partialClosed && profitR >= 1.0)
+           {
+            double closeVol = NormalizeVolume(volume * InpPartialPercent / 100.0);
+            if(closeVol > 0 && closeVol < volume)
+              {
+               if(trade.PositionClosePartial(ticket, closeVol))
+                 {
+                  Print("PARTIAL CLOSE SELL ", DoubleToString(InpPartialPercent, 0),
+                        "% at 1R. Closed=", DoubleToString(closeVol, 2));
+                  g_partialClosed = true;
+                 }
+              }
+           }
+
+         //--- Break-even at 1R
+         if(InpUseBreakEven && !g_breakEvenApplied && profitR >= 1.0 && sl > openPrice)
+           {
+            double newSL = NormalizeDouble(openPrice, _Digits);
+            if(trade.PositionModify(ticket, newSL, tp))
+              {
+               Print("BE SELL #", ticket, " SL->", DoubleToString(newSL, _Digits));
+               g_breakEvenApplied = true;
+              }
+           }
+
+         //--- Trailing stop (after BE is set)
+         if(InpUseTrailingStop && g_breakEvenApplied && profitR >= 1.5)
+           {
+            double trailDist = InpTrailingRMultiple * riskSize;
+            double trailSL = NormalizeDouble(currentAsk + trailDist, _Digits);
+            if(trailSL < sl && trailSL < openPrice)
+              {
+               if(trade.PositionModify(ticket, trailSL, tp))
+                  Print("TRAIL SELL SL->", DoubleToString(trailSL, _Digits));
+              }
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Normalize volume to broker step                                   |
+//+------------------------------------------------------------------+
+double NormalizeVolume(double volume)
+  {
+   double minVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(stepVol <= 0)
+      stepVol = 0.01;
+
+   volume = MathFloor(volume / stepVol) * stepVol;
+
+   if(volume < minVol)
+      return 0; // Can't trade below minimum
+   if(volume > maxVol)
+      volume = maxVol;
+
+   return NormalizeDouble(volume, 2);
+  }
+
+//+------------------------------------------------------------------+
+//| Check if pending order exists                                     |
 //+------------------------------------------------------------------+
 bool OrderExists(ulong ticket)
   {
@@ -527,7 +669,7 @@ bool OrderExists(ulong ticket)
   }
 
 //+------------------------------------------------------------------+
-//| Check if we have an open position with our magic number           |
+//| Check if we have an open position                                 |
 //+------------------------------------------------------------------+
 bool HasOpenPosition()
   {
@@ -544,64 +686,7 @@ bool HasOpenPosition()
   }
 
 //+------------------------------------------------------------------+
-//| Move SL to Break-Even when price reaches 1:1 R                   |
-//+------------------------------------------------------------------+
-void CheckBreakEven()
-  {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
-
-      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl        = PositionGetDouble(POSITION_SL);
-      double tp        = PositionGetDouble(POSITION_TP);
-      long   posType   = PositionGetInteger(POSITION_TYPE);
-
-      double riskSize = MathAbs(openPrice - sl);
-      if(riskSize < _Point)
-         continue; // Safety check
-
-      if(posType == POSITION_TYPE_BUY)
-        {
-         double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         // Price has moved at least 1R in favor
-         if(currentBid >= openPrice + riskSize && sl < openPrice)
-           {
-            double newSL = NormalizeDouble(openPrice, _Digits);
-            if(trade.PositionModify(ticket, newSL, tp))
-              {
-               Print("BREAK-EVEN BUY #", ticket,
-                     " SL moved to ", DoubleToString(newSL, _Digits));
-               g_breakEvenApplied = true;
-              }
-           }
-        }
-      else if(posType == POSITION_TYPE_SELL)
-        {
-         double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         // Price has moved at least 1R in favor
-         if(currentAsk <= openPrice - riskSize && sl > openPrice)
-           {
-            double newSL = NormalizeDouble(openPrice, _Digits);
-            if(trade.PositionModify(ticket, newSL, tp))
-              {
-               Print("BREAK-EVEN SELL #", ticket,
-                     " SL moved to ", DoubleToString(newSL, _Digits));
-               g_breakEvenApplied = true;
-              }
-           }
-        }
-     }
-  }
-
-//+------------------------------------------------------------------+
-//| Delete all pending orders with our magic number                   |
+//| Delete all pending orders with our magic                          |
 //+------------------------------------------------------------------+
 void DeleteAllPendingOrders()
   {
@@ -614,13 +699,12 @@ void DeleteAllPendingOrders()
          OrderGetString(ORDER_SYMBOL) == _Symbol)
         {
          trade.OrderDelete(ticket);
-         Print("Deleted pending order #", ticket);
         }
      }
   }
 
 //+------------------------------------------------------------------+
-//| Cleanup any leftover pending orders (called on new day)           |
+//| Cleanup pending orders (on new day)                               |
 //+------------------------------------------------------------------+
 void CleanupPendingOrders()
   {
@@ -628,21 +712,84 @@ void CleanupPendingOrders()
   }
 
 //+------------------------------------------------------------------+
-//| Draw the range box on the chart                                   |
+//| NY Time to Broker Time conversion                                 |
+//+------------------------------------------------------------------+
+datetime NYTimeToBroker(int nyHour, int nyMinute)
+  {
+   MqlDateTime dt;
+   TimeCurrent(dt);
+
+   bool isDST = IsUSDST(dt.year, dt.mon, dt.day);
+   int nyToUTC = isDST ? 4 : 5;
+   int totalShiftHours = nyToUTC + InpBrokerGMTOffset;
+
+   dt.hour = nyHour + totalShiftHours;
+   dt.min  = nyMinute;
+   dt.sec  = 0;
+
+   while(dt.hour >= 24)
+      dt.hour -= 24;
+
+   return StructToTime(dt);
+  }
+
+//+------------------------------------------------------------------+
+//| US DST detection                                                  |
+//+------------------------------------------------------------------+
+bool IsUSDST(int year, int month, int day)
+  {
+   if(month > 3 && month < 11)
+      return true;
+   if(month < 3 || month > 11)
+      return false;
+
+   if(month == 3)
+     {
+      int dow1 = DayOfWeekCalc(year, 3, 1);
+      int firstSunday = (dow1 == 0) ? 1 : (8 - dow1);
+      int secondSunday = firstSunday + 7;
+      return (day >= secondSunday);
+     }
+
+   if(month == 11)
+     {
+      int dow1 = DayOfWeekCalc(year, 11, 1);
+      int firstSunday = (dow1 == 0) ? 1 : (8 - dow1);
+      return (day < firstSunday);
+     }
+
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//| Zeller day of week                                                |
+//+------------------------------------------------------------------+
+int DayOfWeekCalc(int year, int month, int day)
+  {
+   if(month < 3)
+     {
+      month += 12;
+      year--;
+     }
+   int k = year % 100;
+   int j = year / 100;
+   int h = (day + (13 * (month + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
+   int dow = ((h + 6) % 7);
+   return dow;
+  }
+
+//+------------------------------------------------------------------+
+//| Draw range box on chart                                           |
 //+------------------------------------------------------------------+
 void DrawRangeBox()
   {
    string objName = g_objPrefix + TimeToString(g_rangeStartTime, TIME_DATE|TIME_MINUTES);
-
    ObjectDelete(0, objName);
 
    if(!ObjectCreate(0, objName, OBJ_RECTANGLE, 0,
                     g_rangeStartTime, g_rangeHigh,
                     g_rangeEndTime, g_rangeLow))
-     {
-      Print("Failed to create range box. Error=", GetLastError());
       return;
-     }
 
    ObjectSetInteger(0, objName, OBJPROP_COLOR, InpRangeColor);
    ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_SOLID);
@@ -653,8 +800,8 @@ void DrawRangeBox()
    ObjectSetString(0, objName, OBJPROP_TOOLTIP,
                    "Range: " + DoubleToString(g_rangeHigh, _Digits) +
                    " - " + DoubleToString(g_rangeLow, _Digits) +
-                   " | Size: " + DoubleToString((g_rangeHigh - g_rangeLow) / _Point, 0) + " pts");
-
+                   " | " + DoubleToString(g_rangeSize / _Point, 0) + "pts" +
+                   " | Trend=" + IntegerToString(g_trendDirection));
    ChartRedraw(0);
   }
 
