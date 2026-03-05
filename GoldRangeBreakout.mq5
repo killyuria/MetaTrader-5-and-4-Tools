@@ -12,6 +12,8 @@
 #property description "places Buy Stop / Sell Stop at range extremes,"
 #property description "OCO logic, optional Break-Even, and configurable TP in R multiples."
 
+#include <Trade/Trade.mqh>
+
 //+------------------------------------------------------------------+
 //| Input Parameters                                                  |
 //+------------------------------------------------------------------+
@@ -55,8 +57,6 @@ ulong          g_buyTicket;
 ulong          g_sellTicket;
 datetime       g_lastRangeDate;
 string         g_objPrefix;
-
-#include <Trade/Trade.mqh>
 
 //+------------------------------------------------------------------+
 //| Get the broker's UTC offset for NY time conversion                |
@@ -320,13 +320,18 @@ void PlacePendingOrders()
    sellSL    = NormalizeDouble(sellSL, _Digits);
 
 // Expiration
+   ENUM_ORDER_TYPE_TIME expType = ORDER_TIME_GTC;
    datetime expiration = 0;
    if(InpOrderExpMinutes > 0)
+     {
       expiration = TimeCurrent() + InpOrderExpMinutes * 60;
+      expType = ORDER_TIME_SPECIFIED;
+     }
 
 // Place Buy Stop
-   if(trade.BuyStop(InpLotSize, buyEntry, _Symbol, buySL, buyTP, ORDER_TIME_GTC,
-                    expiration, "GRB Buy Stop"))
+   bool buyResult = trade.BuyStop(InpLotSize, buyEntry, _Symbol, buySL, buyTP,
+                                  expType, expiration, "GRB Buy Stop");
+   if(buyResult)
      {
       g_buyTicket = trade.ResultOrder();
       Print("Buy Stop placed: Entry=", DoubleToString(buyEntry, _Digits),
@@ -341,8 +346,9 @@ void PlacePendingOrders()
      }
 
 // Place Sell Stop
-   if(trade.SellStop(InpLotSize, sellEntry, _Symbol, sellSL, sellTP, ORDER_TIME_GTC,
-                     expiration, "GRB Sell Stop"))
+   bool sellResult = trade.SellStop(InpLotSize, sellEntry, _Symbol, sellSL, sellTP,
+                                    expType, expiration, "GRB Sell Stop");
+   if(sellResult)
      {
       g_sellTicket = trade.ResultOrder();
       Print("Sell Stop placed: Entry=", DoubleToString(sellEntry, _Digits),
