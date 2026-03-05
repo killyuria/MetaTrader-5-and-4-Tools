@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
 //|                                          GoldRangeBreakout.mq5   |
-//|                         Gold Range Breakout Strategy v3.0         |
+//|                         Gold Range Breakout Strategy v4.0         |
 //|                         Timeframe: 5 min - XAUUSD                |
 //+------------------------------------------------------------------+
 #property copyright   "Gold Range Breakout Bot"
 #property link        ""
-#property version     "3.00"
+#property version     "4.00"
 #property strict
-#property description "Range breakout strategy for Gold (XAUUSD) v3.0"
-#property description "Trend filter, entry buffer, partial close, trailing stop."
+#property description "Range breakout strategy for Gold (XAUUSD) v4.0"
+#property description "Session close, smart trailing, trend filter, buffer entry."
 
 #include <Trade/Trade.mqh>
 
@@ -16,37 +16,46 @@
 //| Input Parameters                                                  |
 //+------------------------------------------------------------------+
 input group "=== Range Time Settings (New York Time) ==="
-input int    InpRangeStartHour   = 7;    // Range Start Hour (NY Time)
+input int    InpRangeStartHour   = 7;    // Range Start Hour (NY)
 input int    InpRangeStartMinute = 30;   // Range Start Minute
-input int    InpRangeEndHour     = 7;    // Range End Hour (NY Time)
+input int    InpRangeEndHour     = 7;    // Range End Hour (NY)
 input int    InpRangeEndMinute   = 45;   // Range End Minute
-input int    InpBrokerGMTOffset  = 2;    // Broker GMT Offset (hours, e.g. 2 for UTC+2)
-input int    InpDeletePendingHour   = 10; // Hour (NY) to delete unfilled orders
-input int    InpDeletePendingMinute = 0;  // Minute to delete unfilled orders
+input int    InpBrokerGMTOffset  = 2;    // Broker GMT Offset (hours)
+
+input group "=== Session Close ==="
+input int    InpCloseHour        = 11;   // Close Positions Hour (NY) - end of morning session
+input int    InpCloseMinute      = 0;    // Close Positions Minute
+input int    InpDeletePendingHour   = 9; // Delete Unfilled Orders Hour (NY)
+input int    InpDeletePendingMinute = 30; // Delete Unfilled Orders Minute
 
 input group "=== Trade Settings ==="
 input double InpLotSize          = 0.01; // Lot Size
 input double InpTPMultiplier     = 3.0;  // Take Profit (R multiples)
-input double InpEntryBuffer      = 0.50; // Entry Buffer above/below range (price units, e.g. 0.50 for gold)
-input bool   InpUseBreakEven     = true; // Enable Break-Even at 1:1
+input double InpEntryBuffer      = 0.50; // Entry Buffer (price units)
 input int    InpMaxSpreadPoints  = 50;   // Max Spread (points, 0=disabled)
 
-input group "=== Trend Filter (Higher Timeframe) ==="
+input group "=== Break-Even & Trailing ==="
+input bool   InpUseBreakEven     = true; // Enable Break-Even
+input double InpBETriggerR       = 1.0;  // BE Trigger (R multiples)
+input double InpBELockR          = 0.3;  // BE Lock-in Profit (R multiples, 0=exact entry)
+input bool   InpUseTrailingStop  = true; // Enable Trailing Stop
+input double InpTrailStartR      = 1.0;  // Trail Activation (R multiples)
+input double InpTrailDistR       = 0.5;  // Trail Distance (R multiples)
+
+input group "=== Partial Close ==="
+input bool   InpUsePartialClose  = false; // Enable Partial Close
+input double InpPartialTriggerR  = 1.0;  // Partial Close Trigger (R)
+input double InpPartialPercent   = 50.0; // Partial Close Percentage (%)
+
+input group "=== Trend Filter ==="
 input bool   InpUseTrendFilter   = true;  // Enable Trend Filter
 input ENUM_TIMEFRAMES InpTrendTF = PERIOD_H1; // Trend Timeframe
-input int    InpEMAPeriod        = 200;   // EMA Period for Trend
-input ENUM_TIMEFRAMES InpFastTrendTF = PERIOD_M15; // Fast Trend Timeframe
-input int    InpFastEMAPeriod    = 50;    // Fast EMA Period
+input int    InpEMAPeriod        = 200;   // EMA Period
+input bool   InpOnlyTrendDir     = true;  // Only Trade Trend Direction (false=both if neutral)
 
 input group "=== Range Size Filters ==="
-input double InpMinRangePoints   = 30;    // Minimum Range Size (points)
-input double InpMaxRangePoints   = 500;   // Maximum Range Size (points)
-
-input group "=== Partial Close & Trailing ==="
-input bool   InpUsePartialClose  = true;  // Enable Partial Close at 1R
-input double InpPartialPercent   = 50.0;  // Partial Close Percentage (%)
-input bool   InpUseTrailingStop  = true;  // Enable Trailing Stop (after 1R)
-input double InpTrailingRMultiple = 1.0;  // Trail distance in R multiples
+input double InpMinRangePrice    = 1.00;  // Minimum Range (price units, e.g. $1.00)
+input double InpMaxRangePrice    = 8.00;  // Maximum Range (price units, e.g. $8.00)
 
 input group "=== Day of Week Filter ==="
 input bool   InpTradeMonday      = true;  // Trade Monday
@@ -57,7 +66,6 @@ input bool   InpTradeFriday      = true;  // Trade Friday
 
 input group "=== Visual Settings ==="
 input color  InpRangeColor       = clrDodgerBlue; // Range Box Color
-input int    InpRangeLineWidth   = 2;             // Range Box Border Width
 input bool   InpFillRange        = true;          // Fill Range Box
 input bool   InpShowRange        = true;          // Show Range Box on Chart
 
@@ -95,7 +103,6 @@ bool              g_partialClosed;
 int               g_lastDay;
 string            g_objPrefix;
 int               g_trendEMAHandle;
-int               g_fastEMAHandle;
 int               g_trendDirection; // 1=bullish, -1=bearish, 0=neutral
 
 //+------------------------------------------------------------------+
@@ -107,16 +114,15 @@ int OnInit()
    trade.SetDeviationInPoints(InpSlippage);
    trade.SetTypeFilling(ORDER_FILLING_IOC);
 
-   g_objPrefix = "GRB_" + IntegerToString(InpMagicNumber) + "_";
+   g_objPrefix      = "GRB_" + IntegerToString(InpMagicNumber) + "_";
+   g_trendEMAHandle = INVALID_HANDLE;
 
-// Create EMA indicators for trend filter
    if(InpUseTrendFilter)
      {
       g_trendEMAHandle = iMA(_Symbol, InpTrendTF, InpEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-      g_fastEMAHandle  = iMA(_Symbol, InpFastTrendTF, InpFastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
-      if(g_trendEMAHandle == INVALID_HANDLE || g_fastEMAHandle == INVALID_HANDLE)
+      if(g_trendEMAHandle == INVALID_HANDLE)
         {
-         Print("Failed to create EMA indicators!");
+         Print("Failed to create EMA indicator!");
          return(INIT_FAILED);
         }
      }
@@ -124,10 +130,12 @@ int OnInit()
    ResetDailyState();
    g_lastDay = -1;
 
-   Print("GoldRangeBreakout v3.0 initialized. Magic=", InpMagicNumber,
-         " BrokerGMT=", InpBrokerGMTOffset,
-         " TrendFilter=", InpUseTrendFilter,
-         " PartialClose=", InpUsePartialClose);
+   Print("GoldRangeBreakout v4.0 | Magic=", InpMagicNumber,
+         " | GMT=", InpBrokerGMTOffset,
+         " | SessionClose=", InpCloseHour, ":", InpCloseMinute, " NY",
+         " | Trend=", InpUseTrendFilter,
+         " | BE@", DoubleToString(InpBETriggerR,1), "R+", DoubleToString(InpBELockR,1), "R",
+         " | Trail@", DoubleToString(InpTrailStartR,1), "R dist=", DoubleToString(InpTrailDistR,1), "R");
    return(INIT_SUCCEEDED);
   }
 
@@ -138,8 +146,6 @@ void OnDeinit(const int reason)
   {
    if(g_trendEMAHandle != INVALID_HANDLE)
       IndicatorRelease(g_trendEMAHandle);
-   if(g_fastEMAHandle != INVALID_HANDLE)
-      IndicatorRelease(g_fastEMAHandle);
 
    if(reason == REASON_REMOVE || reason == REASON_RECOMPILE)
      {
@@ -182,7 +188,6 @@ void OnTick()
       g_lastDay = dtNow.day;
       ResetDailyState();
 
-      // Check day of week filter
       if(!IsTradingDay(dtNow.day_of_week))
         {
          g_state = STATE_DONE_FOR_DAY;
@@ -194,6 +199,22 @@ void OnTick()
    datetime rangeStart = NYTimeToBroker(InpRangeStartHour, InpRangeStartMinute);
    datetime rangeEnd   = NYTimeToBroker(InpRangeEndHour, InpRangeEndMinute);
    datetime deleteTime = NYTimeToBroker(InpDeletePendingHour, InpDeletePendingMinute);
+   datetime closeTime  = NYTimeToBroker(InpCloseHour, InpCloseMinute);
+
+//--- SESSION CLOSE: Close all positions and orders at end of session
+   if(now >= closeTime && g_state != STATE_DONE_FOR_DAY)
+     {
+      if(g_state == STATE_ORDERS_PLACED)
+         DeleteAllPendingOrders();
+      if(g_state == STATE_TRADE_ACTIVE)
+         CloseAllPositions();
+      if(g_state != STATE_DONE_FOR_DAY)
+        {
+         g_state = STATE_DONE_FOR_DAY;
+         Print("SESSION CLOSE at ", TimeToString(now, TIME_MINUTES));
+        }
+      return;
+     }
 
 //--- State machine
    switch(g_state)
@@ -216,23 +237,18 @@ void OnTick()
             FinalizeRange();
             if(ValidateRange())
               {
-               // Get trend direction BEFORE placing orders
                if(InpUseTrendFilter)
                   g_trendDirection = GetTrendDirection();
-
                g_state = STATE_RANGE_COMPLETE;
-               Print("Range OK: H=", DoubleToString(g_rangeHigh, _Digits),
+               Print("Range: H=", DoubleToString(g_rangeHigh, _Digits),
                      " L=", DoubleToString(g_rangeLow, _Digits),
-                     " Size=", DoubleToString(g_rangeSize / _Point, 0), "pts",
+                     " Size=$", DoubleToString(g_rangeSize, 2),
                      " Trend=", g_trendDirection);
-
                if(InpShowRange)
                   DrawRangeBox();
               }
             else
-              {
                g_state = STATE_DONE_FOR_DAY;
-              }
            }
          break;
 
@@ -244,7 +260,7 @@ void OnTick()
          CheckOCO();
          if(g_state == STATE_ORDERS_PLACED && now >= deleteTime)
            {
-            Print("Cutoff time. Deleting unfilled orders.");
+            Print("Order cutoff. Deleting unfilled orders.");
             DeleteAllPendingOrders();
             g_state = STATE_DONE_FOR_DAY;
            }
@@ -253,9 +269,7 @@ void OnTick()
       case STATE_TRADE_ACTIVE:
          ManageOpenTrade();
          if(!HasOpenPosition())
-           {
             g_state = STATE_DONE_FOR_DAY;
-           }
          break;
 
       case STATE_DONE_FOR_DAY:
@@ -264,7 +278,7 @@ void OnTick()
   }
 
 //+------------------------------------------------------------------+
-//| Check if today is a trading day                                   |
+//| Trading day filter                                                |
 //+------------------------------------------------------------------+
 bool IsTradingDay(int dayOfWeek)
   {
@@ -275,54 +289,47 @@ bool IsTradingDay(int dayOfWeek)
       case 3: return InpTradeWednesday;
       case 4: return InpTradeThursday;
       case 5: return InpTradeFriday;
-      default: return false; // No trading on weekends
+      default: return false;
      }
   }
 
 //+------------------------------------------------------------------+
-//| Get trend direction from EMA                                      |
-//| Returns: 1=bullish, -1=bearish, 0=neutral                        |
+//| Get trend direction: 1=bull, -1=bear, 0=neutral                   |
 //+------------------------------------------------------------------+
 int GetTrendDirection()
   {
-   if(!InpUseTrendFilter)
+   if(!InpUseTrendFilter || g_trendEMAHandle == INVALID_HANDLE)
       return 0;
 
    double emaValue[1];
-   double fastEmaValue[1];
-
    if(CopyBuffer(g_trendEMAHandle, 0, 0, 1, emaValue) < 1)
       return 0;
-   if(CopyBuffer(g_fastEMAHandle, 0, 0, 1, fastEmaValue) < 1)
-      return 0;
 
-   double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double distance = bid - emaValue[0];
+   double minDistance = g_rangeSize * 0.5; // Need meaningful distance from EMA
 
-// Strong trend: price above both EMAs = bullish, below both = bearish
-   if(currentPrice > emaValue[0] && currentPrice > fastEmaValue[0])
-      return 1;   // Bullish
-   if(currentPrice < emaValue[0] && currentPrice < fastEmaValue[0])
-      return -1;  // Bearish
+   if(distance > minDistance)
+      return 1;   // Bullish: price clearly above EMA
+   if(distance < -minDistance)
+      return -1;  // Bearish: price clearly below EMA
 
-   return 0; // Mixed / neutral - no trade
+   return 0; // Too close to EMA - neutral
   }
 
 //+------------------------------------------------------------------+
-//| Update range from tick                                            |
+//| Update range with current tick/bar data                           |
 //+------------------------------------------------------------------+
 void UpdateRangeFromTick()
   {
    double barHigh = iHigh(_Symbol, PERIOD_CURRENT, 0);
    double barLow  = iLow(_Symbol, PERIOD_CURRENT, 0);
-
-   if(barHigh > g_rangeHigh)
-      g_rangeHigh = barHigh;
-   if(barLow < g_rangeLow)
-      g_rangeLow = barLow;
+   if(barHigh > g_rangeHigh) g_rangeHigh = barHigh;
+   if(barLow < g_rangeLow)   g_rangeLow  = barLow;
   }
 
 //+------------------------------------------------------------------+
-//| Final scan of bars within range window                            |
+//| Final scan all bars within range window                           |
 //+------------------------------------------------------------------+
 void FinalizeRange()
   {
@@ -336,20 +343,17 @@ void FinalizeRange()
         {
          double h = iHigh(_Symbol, PERIOD_CURRENT, i);
          double l = iLow(_Symbol, PERIOD_CURRENT, i);
-         if(h > g_rangeHigh)
-            g_rangeHigh = h;
-         if(l < g_rangeLow)
-            g_rangeLow = l;
+         if(h > g_rangeHigh) g_rangeHigh = h;
+         if(l < g_rangeLow)  g_rangeLow  = l;
         }
      }
-
    g_rangeHigh = NormalizeDouble(g_rangeHigh, _Digits);
    g_rangeLow  = NormalizeDouble(g_rangeLow, _Digits);
    g_rangeSize = g_rangeHigh - g_rangeLow;
   }
 
 //+------------------------------------------------------------------+
-//| Validate range size                                               |
+//| Validate range size (in price units, not points)                  |
 //+------------------------------------------------------------------+
 bool ValidateRange()
   {
@@ -358,37 +362,32 @@ bool ValidateRange()
       Print("Range invalid.");
       return false;
      }
-
-   double rangePts = g_rangeSize / _Point;
-
-   if(rangePts < InpMinRangePoints)
+   if(g_rangeSize < InpMinRangePrice)
      {
-      Print("Range too small: ", DoubleToString(rangePts, 0),
-            "pts < ", DoubleToString(InpMinRangePoints, 0), "pts min");
+      Print("Range too small: $", DoubleToString(g_rangeSize, 2),
+            " < $", DoubleToString(InpMinRangePrice, 2));
       return false;
      }
-
-   if(rangePts > InpMaxRangePoints)
+   if(g_rangeSize > InpMaxRangePrice)
      {
-      Print("Range too large: ", DoubleToString(rangePts, 0),
-            "pts > ", DoubleToString(InpMaxRangePoints, 0), "pts max");
+      Print("Range too large: $", DoubleToString(g_rangeSize, 2),
+            " > $", DoubleToString(InpMaxRangePrice, 2));
       return false;
      }
-
    return true;
   }
 
 //+------------------------------------------------------------------+
-//| Place pending orders with trend filter and buffer                 |
+//| Place pending stop orders                                         |
 //+------------------------------------------------------------------+
 void PlacePendingOrders()
   {
-// Check spread
+// Spread check
    if(InpMaxSpreadPoints > 0)
      {
       long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
       if(spread > InpMaxSpreadPoints)
-         return; // Retry next tick
+         return;
      }
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -396,83 +395,85 @@ void PlacePendingOrders()
    long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    double minDist = stopLevel * _Point;
 
-// Entry prices WITH buffer
+// Entry with buffer
    double buyEntry  = NormalizeDouble(g_rangeHigh + InpEntryBuffer, _Digits);
    double sellEntry = NormalizeDouble(g_rangeLow - InpEntryBuffer, _Digits);
 
-// SL at opposite range extreme (NOT including buffer - SL stays at range boundary)
-   double buySL     = NormalizeDouble(g_rangeLow, _Digits);
-   double sellSL    = NormalizeDouble(g_rangeHigh, _Digits);
+// SL at opposite extreme
+   double buySL  = NormalizeDouble(g_rangeLow, _Digits);
+   double sellSL = NormalizeDouble(g_rangeHigh, _Digits);
 
-// Risk = entry to SL (includes buffer, so slightly larger than pure range)
-   double buyRisk   = buyEntry - buySL;
-   double sellRisk  = sellSL - sellEntry;
+// Risk calculation
+   double buyRisk  = buyEntry - buySL;
+   double sellRisk = sellSL - sellEntry;
 
-// TP based on R multiple of actual risk
-   double buyTP     = NormalizeDouble(buyEntry + InpTPMultiplier * buyRisk, _Digits);
-   double sellTP    = NormalizeDouble(sellEntry - InpTPMultiplier * sellRisk, _Digits);
+// TP
+   double buyTP  = NormalizeDouble(buyEntry + InpTPMultiplier * buyRisk, _Digits);
+   double sellTP = NormalizeDouble(sellEntry - InpTPMultiplier * sellRisk, _Digits);
 
    bool placedAny = false;
 
-//--- Place BUY STOP (only if trend allows or no trend filter)
-   bool allowBuy = true;
-   if(InpUseTrendFilter && g_trendDirection == -1)
-      allowBuy = false; // Don't buy in bearish trend
-   if(InpUseTrendFilter && g_trendDirection == 0)
-      allowBuy = false; // Don't buy in neutral/mixed trend
+// Determine which directions are allowed
+   bool allowBuy  = true;
+   bool allowSell = true;
 
+   if(InpUseTrendFilter && InpOnlyTrendDir)
+     {
+      // Only trend direction when OnlyTrendDir=true
+      if(g_trendDirection == -1)  allowBuy  = false;
+      if(g_trendDirection == 1)   allowSell = false;
+      // Neutral (0): allow both (OCO behavior)
+     }
+   else if(InpUseTrendFilter && !InpOnlyTrendDir)
+     {
+      // Filter only counter-trend, but allow neutral
+      if(g_trendDirection == -1) allowBuy  = false;
+      if(g_trendDirection == 1)  allowSell = false;
+     }
+
+// Place BUY STOP
    if(allowBuy && buyEntry > ask + minDist)
      {
-      bool ok = trade.BuyStop(InpLotSize, buyEntry, _Symbol, buySL, buyTP,
-                              ORDER_TIME_GTC, 0, "GRB Buy");
-      if(ok)
+      if(trade.BuyStop(InpLotSize, buyEntry, _Symbol, buySL, buyTP,
+                       ORDER_TIME_GTC, 0, "GRB Buy"))
         {
          g_buyTicket = trade.ResultOrder();
          Print("BUY STOP #", g_buyTicket,
-               " Entry=", DoubleToString(buyEntry, _Digits),
+               " E=", DoubleToString(buyEntry, _Digits),
                " SL=", DoubleToString(buySL, _Digits),
-               " TP=", DoubleToString(buyTP, _Digits),
-               " Risk=", DoubleToString(buyRisk / _Point, 0), "pts");
+               " TP=", DoubleToString(buyTP, _Digits));
          placedAny = true;
         }
       else
-         Print("FAILED BuyStop. Err=", GetLastError());
+         Print("FAIL BuyStop err=", GetLastError());
      }
    else if(!allowBuy)
-      Print("BUY filtered by trend (direction=", g_trendDirection, ")");
+      Print("BUY blocked: trend=", g_trendDirection);
 
-//--- Place SELL STOP (only if trend allows or no trend filter)
-   bool allowSell = true;
-   if(InpUseTrendFilter && g_trendDirection == 1)
-      allowSell = false; // Don't sell in bullish trend
-   if(InpUseTrendFilter && g_trendDirection == 0)
-      allowSell = false; // Don't sell in neutral/mixed trend
-
+// Place SELL STOP
    if(allowSell && sellEntry < bid - minDist)
      {
-      bool ok = trade.SellStop(InpLotSize, sellEntry, _Symbol, sellSL, sellTP,
-                               ORDER_TIME_GTC, 0, "GRB Sell");
-      if(ok)
+      if(trade.SellStop(InpLotSize, sellEntry, _Symbol, sellSL, sellTP,
+                        ORDER_TIME_GTC, 0, "GRB Sell"))
         {
          g_sellTicket = trade.ResultOrder();
          Print("SELL STOP #", g_sellTicket,
-               " Entry=", DoubleToString(sellEntry, _Digits),
+               " E=", DoubleToString(sellEntry, _Digits),
                " SL=", DoubleToString(sellSL, _Digits),
-               " TP=", DoubleToString(sellTP, _Digits),
-               " Risk=", DoubleToString(sellRisk / _Point, 0), "pts");
+               " TP=", DoubleToString(sellTP, _Digits));
          placedAny = true;
         }
       else
-         Print("FAILED SellStop. Err=", GetLastError());
+         Print("FAIL SellStop err=", GetLastError());
      }
    else if(!allowSell)
-      Print("SELL filtered by trend (direction=", g_trendDirection, ")");
+      Print("SELL blocked: trend=", g_trendDirection);
 
    if(placedAny)
       g_state = STATE_ORDERS_PLACED;
    else
      {
-      Print("No orders placed (filtered or price already broke range).");
+      Print("No orders placed.");
       g_state = STATE_DONE_FOR_DAY;
      }
   }
@@ -482,53 +483,40 @@ void PlacePendingOrders()
 //+------------------------------------------------------------------+
 void CheckOCO()
   {
-   bool buyPending  = (g_buyTicket > 0)  && OrderExists(g_buyTicket);
+   bool buyPending  = (g_buyTicket > 0) && OrderExists(g_buyTicket);
    bool sellPending = (g_sellTicket > 0) && OrderExists(g_sellTicket);
 
-   if(g_buyTicket > 0 && !buyPending)
+   if(g_buyTicket > 0 && !buyPending && HasOpenPosition())
      {
-      if(HasOpenPosition())
-        {
-         if(sellPending)
-            trade.OrderDelete(g_sellTicket);
-         g_state = STATE_TRADE_ACTIVE;
-         Print("BUY triggered -> SELL cancelled.");
-         return;
-        }
+      if(sellPending) trade.OrderDelete(g_sellTicket);
+      g_state = STATE_TRADE_ACTIVE;
+      Print("BUY triggered -> OCO");
+      return;
      }
 
-   if(g_sellTicket > 0 && !sellPending)
+   if(g_sellTicket > 0 && !sellPending && HasOpenPosition())
      {
-      if(HasOpenPosition())
-        {
-         if(buyPending)
-            trade.OrderDelete(g_buyTicket);
-         g_state = STATE_TRADE_ACTIVE;
-         Print("SELL triggered -> BUY cancelled.");
-         return;
-        }
+      if(buyPending) trade.OrderDelete(g_buyTicket);
+      g_state = STATE_TRADE_ACTIVE;
+      Print("SELL triggered -> OCO");
+      return;
      }
 
    if(!buyPending && !sellPending && !HasOpenPosition())
-     {
       g_state = STATE_DONE_FOR_DAY;
-     }
   }
 
 //+------------------------------------------------------------------+
-//| Manage open trade: partial close, BE, trailing                    |
+//| Manage open trade: BE, trailing, partial close                    |
 //+------------------------------------------------------------------+
 void ManageOpenTrade()
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != (long)InpMagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
 
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl        = PositionGetDouble(POSITION_SL);
@@ -537,119 +525,135 @@ void ManageOpenTrade()
       long   posType   = PositionGetInteger(POSITION_TYPE);
 
       double riskSize = MathAbs(openPrice - sl);
-      if(riskSize < _Point)
-         continue;
+      if(riskSize < _Point) continue;
 
       if(posType == POSITION_TYPE_BUY)
+         ManageBuy(ticket, openPrice, sl, tp, volume, riskSize);
+      else if(posType == POSITION_TYPE_SELL)
+         ManageSell(ticket, openPrice, sl, tp, volume, riskSize);
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Manage BUY position                                               |
+//+------------------------------------------------------------------+
+void ManageBuy(ulong ticket, double openPrice, double sl, double tp,
+               double volume, double riskSize)
+  {
+   double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double profitR = (currentBid - openPrice) / riskSize;
+
+//--- Partial close
+   if(InpUsePartialClose && !g_partialClosed && profitR >= InpPartialTriggerR)
+     {
+      double closeVol = NormalizeVolume(volume * InpPartialPercent / 100.0);
+      if(closeVol > 0 && closeVol < volume)
         {
-         double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-         double profitDist = currentBid - openPrice;
-         double profitR    = profitDist / riskSize;
-
-         //--- Partial close at 1R
-         if(InpUsePartialClose && !g_partialClosed && profitR >= 1.0)
+         if(trade.PositionClosePartial(ticket, closeVol))
            {
-            double closeVol = NormalizeVolume(volume * InpPartialPercent / 100.0);
-            if(closeVol > 0 && closeVol < volume)
-              {
-               if(trade.PositionClosePartial(ticket, closeVol))
-                 {
-                  Print("PARTIAL CLOSE BUY ", DoubleToString(InpPartialPercent, 0),
-                        "% at 1R. Closed=", DoubleToString(closeVol, 2));
-                  g_partialClosed = true;
-                 }
-              }
-           }
-
-         //--- Break-even at 1R
-         if(InpUseBreakEven && !g_breakEvenApplied && profitR >= 1.0 && sl < openPrice)
-           {
-            double newSL = NormalizeDouble(openPrice, _Digits);
-            if(trade.PositionModify(ticket, newSL, tp))
-              {
-               Print("BE BUY #", ticket, " SL->", DoubleToString(newSL, _Digits));
-               g_breakEvenApplied = true;
-              }
-           }
-
-         //--- Trailing stop (after BE is set)
-         if(InpUseTrailingStop && g_breakEvenApplied && profitR >= 1.5)
-           {
-            double trailDist = InpTrailingRMultiple * riskSize;
-            double trailSL = NormalizeDouble(currentBid - trailDist, _Digits);
-            if(trailSL > sl && trailSL > openPrice)
-              {
-               if(trade.PositionModify(ticket, trailSL, tp))
-                  Print("TRAIL BUY SL->", DoubleToString(trailSL, _Digits));
-              }
+            Print("PARTIAL BUY ", DoubleToString(InpPartialPercent, 0), "% at ",
+                  DoubleToString(profitR, 1), "R");
+            g_partialClosed = true;
            }
         }
-      else if(posType == POSITION_TYPE_SELL)
+     }
+
+//--- Trailing stop (runs continuously after activation)
+   if(InpUseTrailingStop && profitR >= InpTrailStartR)
+     {
+      double trailSL = NormalizeDouble(currentBid - InpTrailDistR * riskSize, _Digits);
+      // Only move SL up, never down
+      if(trailSL > sl)
         {
-         double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-         double profitDist = openPrice - currentAsk;
-         double profitR    = profitDist / riskSize;
-
-         //--- Partial close at 1R
-         if(InpUsePartialClose && !g_partialClosed && profitR >= 1.0)
+         if(trade.PositionModify(ticket, trailSL, tp))
            {
-            double closeVol = NormalizeVolume(volume * InpPartialPercent / 100.0);
-            if(closeVol > 0 && closeVol < volume)
-              {
-               if(trade.PositionClosePartial(ticket, closeVol))
-                 {
-                  Print("PARTIAL CLOSE SELL ", DoubleToString(InpPartialPercent, 0),
-                        "% at 1R. Closed=", DoubleToString(closeVol, 2));
-                  g_partialClosed = true;
-                 }
-              }
+            Print("TRAIL BUY SL=", DoubleToString(trailSL, _Digits),
+                  " lock=", DoubleToString((trailSL - openPrice) / riskSize, 2), "R");
+            g_breakEvenApplied = true;
            }
-
-         //--- Break-even at 1R
-         if(InpUseBreakEven && !g_breakEvenApplied && profitR >= 1.0 && sl > openPrice)
+        }
+     }
+//--- Break-even (only if trailing is off or hasn't triggered yet)
+   else if(InpUseBreakEven && !g_breakEvenApplied && profitR >= InpBETriggerR)
+     {
+      double beSL = NormalizeDouble(openPrice + InpBELockR * riskSize, _Digits);
+      if(beSL > sl)
+        {
+         if(trade.PositionModify(ticket, beSL, tp))
            {
-            double newSL = NormalizeDouble(openPrice, _Digits);
-            if(trade.PositionModify(ticket, newSL, tp))
-              {
-               Print("BE SELL #", ticket, " SL->", DoubleToString(newSL, _Digits));
-               g_breakEvenApplied = true;
-              }
-           }
-
-         //--- Trailing stop (after BE is set)
-         if(InpUseTrailingStop && g_breakEvenApplied && profitR >= 1.5)
-           {
-            double trailDist = InpTrailingRMultiple * riskSize;
-            double trailSL = NormalizeDouble(currentAsk + trailDist, _Digits);
-            if(trailSL < sl && trailSL < openPrice)
-              {
-               if(trade.PositionModify(ticket, trailSL, tp))
-                  Print("TRAIL SELL SL->", DoubleToString(trailSL, _Digits));
-              }
+            Print("BE BUY SL=", DoubleToString(beSL, _Digits),
+                  " lock=+", DoubleToString(InpBELockR, 2), "R");
+            g_breakEvenApplied = true;
            }
         }
      }
   }
 
 //+------------------------------------------------------------------+
-//| Normalize volume to broker step                                   |
+//| Manage SELL position                                              |
+//+------------------------------------------------------------------+
+void ManageSell(ulong ticket, double openPrice, double sl, double tp,
+                double volume, double riskSize)
+  {
+   double currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double profitR = (openPrice - currentAsk) / riskSize;
+
+//--- Partial close
+   if(InpUsePartialClose && !g_partialClosed && profitR >= InpPartialTriggerR)
+     {
+      double closeVol = NormalizeVolume(volume * InpPartialPercent / 100.0);
+      if(closeVol > 0 && closeVol < volume)
+        {
+         if(trade.PositionClosePartial(ticket, closeVol))
+           {
+            Print("PARTIAL SELL ", DoubleToString(InpPartialPercent, 0), "% at ",
+                  DoubleToString(profitR, 1), "R");
+            g_partialClosed = true;
+           }
+        }
+     }
+
+//--- Trailing stop (runs continuously after activation)
+   if(InpUseTrailingStop && profitR >= InpTrailStartR)
+     {
+      double trailSL = NormalizeDouble(currentAsk + InpTrailDistR * riskSize, _Digits);
+      // Only move SL down (toward profit), never up
+      if(trailSL < sl)
+        {
+         if(trade.PositionModify(ticket, trailSL, tp))
+           {
+            Print("TRAIL SELL SL=", DoubleToString(trailSL, _Digits),
+                  " lock=", DoubleToString((openPrice - trailSL) / riskSize, 2), "R");
+            g_breakEvenApplied = true;
+           }
+        }
+     }
+//--- Break-even (only if trailing is off or hasn't triggered yet)
+   else if(InpUseBreakEven && !g_breakEvenApplied && profitR >= InpBETriggerR)
+     {
+      double beSL = NormalizeDouble(openPrice - InpBELockR * riskSize, _Digits);
+      if(beSL < sl)
+        {
+         if(trade.PositionModify(ticket, beSL, tp))
+           {
+            Print("BE SELL SL=", DoubleToString(beSL, _Digits),
+                  " lock=+", DoubleToString(InpBELockR, 2), "R");
+            g_breakEvenApplied = true;
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Normalize volume                                                  |
 //+------------------------------------------------------------------+
 double NormalizeVolume(double volume)
   {
    double minVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxVol  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double stepVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-
-   if(stepVol <= 0)
-      stepVol = 0.01;
-
+   if(stepVol <= 0) stepVol = 0.01;
    volume = MathFloor(volume / stepVol) * stepVol;
-
-   if(volume < minVol)
-      return 0; // Can't trade below minimum
-   if(volume > maxVol)
-      volume = maxVol;
-
+   if(volume < minVol) return 0;
    return NormalizeDouble(volume, 2);
   }
 
@@ -658,26 +662,21 @@ double NormalizeVolume(double volume)
 //+------------------------------------------------------------------+
 bool OrderExists(ulong ticket)
   {
-   if(ticket == 0)
-      return false;
+   if(ticket == 0) return false;
    for(int i = OrdersTotal() - 1; i >= 0; i--)
-     {
-      if(OrderGetTicket(i) == ticket)
-         return true;
-     }
+      if(OrderGetTicket(i) == ticket) return true;
    return false;
   }
 
 //+------------------------------------------------------------------+
-//| Check if we have an open position                                 |
+//| Check if open position exists                                     |
 //+------------------------------------------------------------------+
 bool HasOpenPosition()
   {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
+      if(ticket == 0) continue;
       if(PositionGetInteger(POSITION_MAGIC) == (long)InpMagicNumber &&
          PositionGetString(POSITION_SYMBOL) == _Symbol)
          return true;
@@ -686,25 +685,40 @@ bool HasOpenPosition()
   }
 
 //+------------------------------------------------------------------+
-//| Delete all pending orders with our magic                          |
+//| Close all positions with our magic                                |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(PositionGetInteger(POSITION_MAGIC) == (long)InpMagicNumber &&
+         PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+         trade.PositionClose(ticket);
+         Print("SESSION CLOSE position #", ticket);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Delete all pending orders                                         |
 //+------------------------------------------------------------------+
 void DeleteAllPendingOrders()
   {
    for(int i = OrdersTotal() - 1; i >= 0; i--)
      {
       ulong ticket = OrderGetTicket(i);
-      if(ticket == 0)
-         continue;
+      if(ticket == 0) continue;
       if(OrderGetInteger(ORDER_MAGIC) == (long)InpMagicNumber &&
          OrderGetString(ORDER_SYMBOL) == _Symbol)
-        {
          trade.OrderDelete(ticket);
-        }
      }
   }
 
 //+------------------------------------------------------------------+
-//| Cleanup pending orders (on new day)                               |
+//| Cleanup on new day                                                |
 //+------------------------------------------------------------------+
 void CleanupPendingOrders()
   {
@@ -712,24 +726,20 @@ void CleanupPendingOrders()
   }
 
 //+------------------------------------------------------------------+
-//| NY Time to Broker Time conversion                                 |
+//| NY Time -> Broker Time                                            |
 //+------------------------------------------------------------------+
 datetime NYTimeToBroker(int nyHour, int nyMinute)
   {
    MqlDateTime dt;
    TimeCurrent(dt);
-
    bool isDST = IsUSDST(dt.year, dt.mon, dt.day);
    int nyToUTC = isDST ? 4 : 5;
-   int totalShiftHours = nyToUTC + InpBrokerGMTOffset;
+   int shift   = nyToUTC + InpBrokerGMTOffset;
 
-   dt.hour = nyHour + totalShiftHours;
+   dt.hour = nyHour + shift;
    dt.min  = nyMinute;
    dt.sec  = 0;
-
-   while(dt.hour >= 24)
-      dt.hour -= 24;
-
+   while(dt.hour >= 24) dt.hour -= 24;
    return StructToTime(dt);
   }
 
@@ -738,48 +748,37 @@ datetime NYTimeToBroker(int nyHour, int nyMinute)
 //+------------------------------------------------------------------+
 bool IsUSDST(int year, int month, int day)
   {
-   if(month > 3 && month < 11)
-      return true;
-   if(month < 3 || month > 11)
-      return false;
-
+   if(month > 3 && month < 11)  return true;
+   if(month < 3 || month > 11)  return false;
    if(month == 3)
      {
       int dow1 = DayOfWeekCalc(year, 3, 1);
-      int firstSunday = (dow1 == 0) ? 1 : (8 - dow1);
-      int secondSunday = firstSunday + 7;
-      return (day >= secondSunday);
+      int firstSun = (dow1 == 0) ? 1 : (8 - dow1);
+      return (day >= firstSun + 7);
      }
-
    if(month == 11)
      {
       int dow1 = DayOfWeekCalc(year, 11, 1);
-      int firstSunday = (dow1 == 0) ? 1 : (8 - dow1);
-      return (day < firstSunday);
+      int firstSun = (dow1 == 0) ? 1 : (8 - dow1);
+      return (day < firstSun);
      }
-
    return false;
   }
 
 //+------------------------------------------------------------------+
-//| Zeller day of week                                                |
+//| Zeller day of week (0=Sun, 1=Mon, ... 6=Sat)                     |
 //+------------------------------------------------------------------+
 int DayOfWeekCalc(int year, int month, int day)
   {
-   if(month < 3)
-     {
-      month += 12;
-      year--;
-     }
+   if(month < 3) { month += 12; year--; }
    int k = year % 100;
    int j = year / 100;
-   int h = (day + (13 * (month + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-   int dow = ((h + 6) % 7);
-   return dow;
+   int h = (day + (13*(month+1))/5 + k + k/4 + j/4 - 2*j) % 7;
+   return ((h + 6) % 7);
   }
 
 //+------------------------------------------------------------------+
-//| Draw range box on chart                                           |
+//| Draw range box                                                    |
 //+------------------------------------------------------------------+
 void DrawRangeBox()
   {
@@ -793,16 +792,15 @@ void DrawRangeBox()
 
    ObjectSetInteger(0, objName, OBJPROP_COLOR, InpRangeColor);
    ObjectSetInteger(0, objName, OBJPROP_STYLE, STYLE_SOLID);
-   ObjectSetInteger(0, objName, OBJPROP_WIDTH, InpRangeLineWidth);
+   ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
    ObjectSetInteger(0, objName, OBJPROP_FILL, InpFillRange);
    ObjectSetInteger(0, objName, OBJPROP_BACK, true);
    ObjectSetInteger(0, objName, OBJPROP_SELECTABLE, false);
    ObjectSetString(0, objName, OBJPROP_TOOLTIP,
-                   "Range: " + DoubleToString(g_rangeHigh, _Digits) +
-                   " - " + DoubleToString(g_rangeLow, _Digits) +
-                   " | " + DoubleToString(g_rangeSize / _Point, 0) + "pts" +
-                   " | Trend=" + IntegerToString(g_trendDirection));
+                   "H=" + DoubleToString(g_rangeHigh, _Digits) +
+                   " L=" + DoubleToString(g_rangeLow, _Digits) +
+                   " $" + DoubleToString(g_rangeSize, 2) +
+                   " T=" + IntegerToString(g_trendDirection));
    ChartRedraw(0);
   }
-
 //+------------------------------------------------------------------+
