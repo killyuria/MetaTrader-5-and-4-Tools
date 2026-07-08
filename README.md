@@ -1,123 +1,139 @@
-# Indicators and EA Snippets for MetaTrader 5
+# MetaTrader 5 and 4 Tools
 
-<br/>
+Open-source tools, indicators, scripts, and Expert Advisor snippets for MetaTrader 5, focused on trading automation, MQL5 development, backtesting workflows, and practical algorithmic trading education.
 
-> :warning: MT4 abandoned. Only the code for MT5 is up to date and gets further updates.
+> ⚠️ Note: MT4 content is not actively maintained. The main focus of this repository is MetaTrader 5 and MQL5.
 
-<br/>
+## Project Purpose
 
-Some MT5 indicators and tools I use for my trading. Feel free to contribute improvements and let me know your ideas.
+This repository is intended to become a practical learning and development toolkit for traders, students, and developers who want to understand how MetaTrader 5 tools are structured.
 
-My major developments are the **[Trade Manager](/Trade%20Manager/Trade%20Manager.mq5)**, a **[Currency Strength indicator](/Currency%20Index/CurrencyStrength.mq5)** and a **[Pivot Points indicator](/Pivots/MultiPivots.mq5)**. A special facility allows for up to 20 times faster backtesting of currency strength related strategies. A SQLite database is used to **[build up a store of currency strength data](/EA%20Snippets/CurrencyStrength/CurrencyStrengthWrite3.mq5)**. This database can then be used for backtesting with the **[Trade Manager](/Trade%20Manager/Trade%20Manager.mq5)**, or any other tool, without time consuming calculations.
+The project includes resources related to:
 
-For those who want to install everything in one shot, I have added a zip file of my **[entire MQL5 content](/MQL5%20Entire%20Content)**. Just install a new MT5 terminal and replace the folder MQL5 with the content of the zip file. In options, charts, set max bars to 1000000, some tools need this.
+- MQL5 indicators
+- Expert Advisor snippets
+- Trade management tools
+- Currency strength analysis
+- Pivot point tools
+- Scripts and utilities
+- Backtesting-related workflows
+- Python and MetaTrader integration experiments
+- SQL/database-based trading research utilities
 
-<br/>
+The goal is to make these resources easier to study, test, improve, and reuse in real algorithmic trading development workflows.
 
-[![](http://img.youtube.com/vi/1ea2rmEVieE/maxresdefault.jpg)](http://www.youtube.com/watch?v=1ea2rmEVieE "MetaTrader 5 Trading Tools")
+## Maintainer Note
 
-<br/>
-<br/>
+This repository is based on an existing open-source fork. My current work is focused on improving the project by organizing the codebase, documenting the tools, adding clearer usage examples, reviewing MQL5 code, and developing new educational resources around MetaTrader 5 automation.
 
-## Trade Manager Keys
+The objective is to gradually turn this repository into a cleaner, more accessible, and more contributor-friendly resource for the MQL5 and algorithmic trading community.
 
+## Main Areas
 
-### <code>Ctrl</code> Activates and Deactivates the Command Mode
+### Trade Management
 
-   Keys in Command Mode:
-   
-   **<code>1</code>** Open a Buy Trade<br>
-   **<code>3</code>** Open a Sell Trade<br>
-   **<code>5</code>** Activate/Deactivate Hard Single Break Even Mode<br>
-   **<code>6</code>** Activate/Deactivate Soft Basket Break Even Mode<br>
-   **<code>8</code>** Activate/Deactivate Close Basket at Break Even<br>
-   **<code>0</code>** Close all Trades<br>
-   **<code>,</code>** Decrease Trade Volume<br>
-   **<code>.</code>** Increase Trade Volume<br>
-   **<code>A</code>** Decrease Stop Loss<br>
-   **<code>S</code>** Increase Stop Loss<br>
-   **<code>D</code>** Decrease Take Profit<br>
-   **<code>F</code>** Increase Take Profit<br>
-   **<code>X</code>** Toggle Currency to open Buy/Sell Bag (7 Trades)<br>
-   **<code>Y</code>** Reset open Buy/Sell Bag to current Pair<br>
-   **<code>V</code>** Toggle View of opened Trades by Pairs or Currencies<br>
-   **<code>L</code>** Toggle Lipstick (Drawings of Asia Range and NY Open)<br>
+Tools and snippets related to order handling, trade management, risk control, basket management, and manual/semi-automated execution workflows.
 
-   
-### <code>Shift</code> Activates and Deactivates the Single Trade Management Mode
+### Indicators
 
-   Keys in Single Trade Management Mode:
+A collection of MetaTrader 5 indicators and utilities for technical analysis, charting, currency strength, pivots, moving averages, volatility, volume, and market structure.
 
-   **<code>A</code>** Decrease Stop Loss<br>
-   **<code>S</code>** Increase Stop Loss<br>
-   **<code>D</code>** Decrease Take Profit<br>
-   **<code>F</code>** Increase Take Profit<br>
-   **<code>G</code>** Activate Previous Trade<br>
-   **<code>H</code>** Activate Next Trade<br>
+### Expert Advisor Snippets
 
-<br/>
-<br/>
+Reusable MQL5 examples and code fragments that can help developers understand Expert Advisor structure, entry logic, order management, and testing workflows.
 
-MT5 uses the key codes not the characters. The characters listed here are based on this QWERTZ keyboard layout. If your keyboard layout is different, be sure you use the same keys, not the corresponding characters.
+### Backtesting and Research
 
-<br/>
+Resources intended to support faster testing, strategy research, and structured experimentation inside MetaTrader 5.
 
-![QWERTZ Keyboard Layout](./docs/images/QWERTZ-2.png)
+### Python / SQL / Data Tools
 
-<br/>
-<br/>
+Experimental resources related to Python integration, SQL databases, and data workflows for trading research.
 
-## Trade Manager Sample, Setup a Basket with balanced Risk
+## Repository Structure
 
+| Folder / Area | Description |
+|---|---|
+| `Trade Manager` | Tools related to trade execution and trade management |
+| `Currency Index` | Currency strength and currency index analysis tools |
+| `Pivots` | Pivot point indicators and related resources |
+| `EA Snippets` | Expert Advisor examples and reusable MQL5 code snippets |
+| `Scripts` | Utility scripts for MetaTrader workflows |
+| `Include` | Shared MQL5 include files |
+| `Libraries` | Supporting libraries and reusable components |
+| `Machine Learning` | Experimental machine learning and trading research resources |
+| `Mql5-Python-Integration-main` | Python and MetaTrader integration experiments |
+| `SQL Server` / `R SQL Server` | Database-oriented research and analysis resources |
 
-[![](http://img.youtube.com/vi/IGt1eQA1peg/maxresdefault.jpg)](http://www.youtube.com/watch?v=IGt1eQA1peg "Trade Manager | Setup Basket with balanced Risk")
+## Installation
 
-<br/>
-<br/>
+Most files are intended to be used inside the MetaTrader 5 data folder.
 
-## Trade Manager Aggregated View and Close of Trades
+General installation workflow:
 
+1. Open MetaTrader 5.
+2. Go to `File > Open Data Folder`.
+3. Open the `MQL5` folder.
+4. Copy the files into the correct folder:
+   - Indicators: `MQL5/Indicators`
+   - Expert Advisors: `MQL5/Experts`
+   - Scripts: `MQL5/Scripts`
+   - Include files: `MQL5/Include`
+   - Libraries: `MQL5/Libraries`
+5. Restart MetaTrader 5 or refresh the Navigator panel.
+6. Compile the `.mq5` files in MetaEditor before using them.
 
-[![](http://img.youtube.com/vi/XUngix22JGs/maxresdefault.jpg)](http://www.youtube.com/watch?v=XUngix22JGs "Trade Manager | Trade Manager Aggregated View of Trades")
+## Usage
 
-<br/>
-<br/>
+This repository is mainly designed for learning, testing, and development.
 
-## Trade Manager Add Pending Orders with Drag and Drop and Proper Risk
+Recommended workflow:
 
+1. Start with a demo account.
+2. Open the relevant `.mq5` file in MetaEditor.
+3. Read the input parameters and comments.
+4. Compile the file.
+5. Test the tool on historical data or in the Strategy Tester.
+6. Validate behavior before using any tool in a live environment.
 
-[![](http://img.youtube.com/vi/UVdEPk4fzwE/maxresdefault.jpg)](http://www.youtube.com/watch?v=UVdEPk4fzwE "Trade Manager | Add Pending Orders with Drag and Drop and Proper Risk")
+## Roadmap
 
-<br/>
-<br/>
+Planned improvements:
 
-## Forex Currency Strength Analysis Tool
+- [ ] Improve README and project documentation
+- [ ] Add individual documentation for the main tools
+- [ ] Add screenshots and usage examples
+- [ ] Organize folders by category
+- [ ] Identify maintained vs experimental tools
+- [ ] Add setup guides for beginners
+- [ ] Add code comments to important MQL5 files
+- [ ] Add examples for indicator usage
+- [ ] Add examples for Expert Advisor snippets
+- [ ] Review and refactor selected MQL5 tools
+- [ ] Add testing notes for Strategy Tester workflows
+- [ ] Improve Python / MetaTrader integration documentation
 
+## Contributing
 
-[![](http://img.youtube.com/vi/g5eWgzQYdiU/maxresdefault.jpg)](http://www.youtube.com/watch?v=g5eWgzQYdiU "Forex Currency Strength Analysis Tool")
+Contributions are welcome.
 
-<br/>
-<br/>
+Useful contributions include:
 
-## Seconds Charts for MetaTrader 5
+- Documentation improvements
+- Bug reports
+- Code refactoring
+- MQL5 examples
+- Installation guides
+- Screenshots or usage examples
+- Testing notes
+- Strategy Tester workflow improvements
 
+Before submitting a pull request, please make sure the code compiles in MetaEditor and include a short explanation of what was changed.
 
-[![](http://img.youtube.com/vi/ElzsQ5niUTk/maxresdefault.jpg)](http://www.youtube.com/watch?v=ElzsQ5niUTk "Seconds Charts for MetaTrader 5")
+## Disclaimer
 
-<br/>
-<br/>
+This repository is for educational and development purposes only.
 
-## Synchronized Chart Scroll and Session Marking for MetaTrader 5
+Nothing in this repository is financial advice. Trading involves risk, and all tools, indicators, scripts, and Expert Advisor snippets should be tested carefully on demo accounts and historical data before any live use.
 
-
-[![](http://img.youtube.com/vi/tWLcVPxSsCo/maxresdefault.jpg)](http://www.youtube.com/watch?v=tWLcVPxSsCo "Synchronized Chart Scroll and Session Marking for MetaTrader 5")
-
-<br/>
-<br/>
-
-## Trade Copier Service for Trade Manager for MetaTrader 5
-
-
-[![](http://img.youtube.com/vi/wVk4FK8SvyU/maxresdefault.jpg)](http://www.youtube.com/watch?v=wVk4FK8SvyU "Trade Copier Service for Trade Manager for MetaTrader 5")
-
-
+No profitability is guaranteed.
